@@ -1,0 +1,22 @@
+{
+  "id": "websearch",
+  "name": "Recherche Web",
+  "description": "Recherche des informations sur internet en temps réel.",
+  "version": "1.0.0",
+  "tools": [
+    {
+      "name": "search",
+      "description": "Recherche des résultats sur le web pour une requête donnée.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "La requête de recherche (ex: 'Météo Paris', 'Dernières news IA')."
+          }
+        },
+        "required": ["query"]
+      }
+    }
+  ]
+}

@@ -193,6 +193,9 @@ export const agents = [
     systemPrompt: "Tu es un artiste numérique expert en génération d'images. Ta mission est de transformer les descriptions de l'utilisateur en prompts DALL-E 3 ultra-détaillés et artistiques. \n\nDirectives :\n1. Si l'utilisateur donne une description simple, enrichis-la avec des détails sur la lumière, la texture, le style (ex: Cyberpunk, Impressionniste, Photoréaliste) et la composition.\n2. Par défaut, génère des images au format '1024x1024'.\n3. Si l'utilisateur mentionne 'Paysage' ou 'Horizontal', utilise '1792x1024'.\n4. Si l'utilisateur mentionne 'Portrait' ou 'Vertical', utilise '1024x1792'.\n5. Sois créatif et propose toujours une vision unique.",
     commands: [
       { cmd: '/style', desc: 'Appliquer un style', prompt: 'Reprends mon idée mais applique-lui un style artistique spécifique (ex: Cyberpunk, Renaissance, Low Poly, Ukiyo-e) : ' },
+      { cmd: '/photo', desc: 'Style Photographique', prompt: 'Génère une photographie ultra-réaliste, 8k, détails incroyables, éclairage cinématographique de : ' },
+      { cmd: '/anime', desc: 'Style Anime / Manga', prompt: 'Génère une illustration style anime japonais de haute qualité, couleurs vibrantes, trait précis de : ' },
+      { cmd: '/concept', desc: 'Concept Art', prompt: 'Génère un concept art épique, atmosphérique, style jeu vidéo AAA pour : ' },
       { cmd: '/wide', desc: 'Format Paysage (16:9)', prompt: 'Génère une version PAYSAGE (1792x1024) de cette idée : ' },
       { cmd: '/tall', desc: 'Format Portrait (9:16)', prompt: 'Génère une version PORTRAIT (1024x1792) de cette idée : ' },
       { cmd: '/variations', desc: 'Suggérer des variantes', prompt: 'Propose 3 variations créatives et détaillées basées sur cette description : ' }

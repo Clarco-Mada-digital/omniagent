@@ -1,1 +1,5 @@
-Salut ! Je veux continuer le projet OmniAgent. Avant de commencer, lis impérativement le dossier docs/management pour comprendre l'état actuel (context_summary.md), la vision globale (product_backlog.md) et les tâches immédiates (sprint_backlog.md). Agis ensuite comme le Scrum Master pour me dire quelle est la prochaine étape du Sprint.
+Salut ! Je veux continuer le projet OmniAgent. Avant de commencer, lis impérativement le dossier docs/management pour comprendre l'état actuel (context_summary.md), la vision globale (product_backlog.md) et les tâches immédiates (sprint_backlog.md). 
+
+IMPORTANT : Ce projet utilise des "Skills" spécialisées dans `.agents/skills/`. Utilise impérativement `/rust-skills` pour tout ce qui touche au backend, la skill `ui-ux-pro-max` pour garantir un design premium et `find-skills` pour trouver les skills dont tu as besoin.
+
+Agis ensuite comme le Scrum Master pour me dire quelle est la prochaine étape du Sprint.

@@ -456,30 +456,93 @@ struct OpenAIImageData {
 
 #[tauri::command]
 async fn generate_image(
+    provider: String,
     api_key: String,
     prompt: String,
     size: Option<String>,
 ) -> Result<String, String> {
     let client = Client::new();
-    let res = client
-        .post("https://api.openai.com/v1/images/generations")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&serde_json::json!({
-            "model": "dall-e-3",
-            "prompt": prompt,
-            "n": 1,
-            "size": size.unwrap_or_else(|| "1024x1024".to_string())
-        }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    
+    if provider == "openai" {
+        let res = client
+            .post("https://api.openai.com/v1/images/generations")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&serde_json::json!({
+                "model": "dall-e-3",
+                "prompt": prompt,
+                "n": 1,
+                "size": size.unwrap_or_else(|| "1024x1024".to_string())
+            }))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
 
-    if !res.status().is_success() {
-        return Err(format!("Erreur DALL-E: {}", res.status()));
+        if !res.status().is_success() {
+            let body = res.text().await.unwrap_or_default();
+            return Err(format!("Erreur OpenAI: {} - {}", res.status(), body));
+        }
+
+        let json: OpenAIImageResponse = res.json().await.map_err(|e| e.to_string())?;
+        return Ok(json.data[0].url.clone());
+    } else if provider == "gemini" {
+        // Gemini via OpenAI compatibility layer
+        let res = client
+            .post("https://generativelanguage.googleapis.com/v1beta/openai/images/generations")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&serde_json::json!({
+                "model": "imagen-3.0-generate-001", // Placeholder, Gemini support varies
+                "prompt": prompt,
+                "n": 1,
+                "size": size.unwrap_or_else(|| "1024x1024".to_string())
+            }))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if !res.status().is_success() {
+            let body = res.text().await.unwrap_or_default();
+            return Err(format!("Erreur Gemini Image: {} - {}", res.status(), body));
+        }
+
+        let json: OpenAIImageResponse = res.json().await.map_err(|e| e.to_string())?;
+        return Ok(json.data[0].url.clone());
+    } else if provider == "openrouter" {
+        // OpenRouter uses chat/completions for image generation with modalities
+        let res = client
+            .post("https://openrouter.ai/api/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&serde_json::json!({
+                "model": "openai/dall-e-3", // OpenRouter proxying DALL-E or others
+                "messages": [{ "role": "user", "content": prompt }],
+                "modalities": ["image"]
+            }))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if !res.status().is_success() {
+            let body = res.text().await.unwrap_or_default();
+            return Err(format!("Erreur OpenRouter Image: {} - {}", res.status(), body));
+        }
+
+        // OpenRouter might return a different format or proxy OpenAI
+        let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+        
+        // Try OpenAI format first
+        if let Some(url) = json["data"][0]["url"].as_str() {
+            return Ok(url.to_string());
+        }
+        
+        // Try multimodal response format
+        if let Some(content) = json["choices"][0]["message"]["content"].as_str() {
+             // If it's a URL in text or markdown
+             return Ok(content.to_string());
+        }
+
+        return Err("Format de réponse d'image inconnu.".to_string());
     }
 
-    let json: OpenAIImageResponse = res.json().await.map_err(|e| e.to_string())?;
-    Ok(json.data[0].url.clone())
+    Err(format!("Le fournisseur '{}' ne supporte pas encore la génération d'images.", provider))
 }
 
 #[tauri::command]
@@ -520,6 +583,22 @@ fn list_gallery_images(app: tauri::AppHandle) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+fn delete_gallery_image(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let gallery_dir = get_gallery_dir(&app);
+    let file_path = std::path::PathBuf::from(&path);
+    
+    // Sécurité : s'assurer que le fichier est bien dans le dossier gallery
+    if !file_path.starts_with(&gallery_dir) {
+        return Err("Accès non autorisé.".to_string());
+    }
+    
+    if file_path.exists() {
+        std::fs::remove_file(file_path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn read_file_content(path: String) -> Result<String, String> {
     fs::read_to_string(path).map_err(|e| format!("Impossible de lire le fichier: {}", e))
 }
@@ -529,6 +608,67 @@ async fn read_file_base64(path: String) -> Result<String, String> {
     use base64::{Engine as _, engine::general_purpose};
     let bytes = fs::read(path).map_err(|e| format!("Erreur lecture binaire: {}", e))?;
     Ok(general_purpose::STANDARD.encode(bytes))
+}
+
+#[tauri::command]
+fn list_plugins(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>, String> {
+    let mut plugins = Vec::new();
+    let plugins_dir = app.path().app_data_dir().unwrap_or_default().join("plugins");
+    
+    // Si on est en dev, le dossier est à la racine du projet
+    let dev_plugins_dir = std::path::PathBuf::from("plugins");
+    let target_dir = if dev_plugins_dir.exists() { dev_plugins_dir } else { plugins_dir };
+
+    if !target_dir.exists() {
+        return Ok(plugins);
+    }
+
+    if let Ok(entries) = std::fs::read_dir(target_dir) {
+        for entry in entries.flatten() {
+            let manifest_path = entry.path().join("manifest.json");
+            if manifest_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(manifest_path) {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                        plugins.push(json);
+                    }
+                }
+            }
+        }
+    }
+    Ok(plugins)
+}
+
+#[tauri::command]
+async fn run_plugin_tool(
+    plugin_id: String,
+    tool_name: String,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    if plugin_id == "calculator" && tool_name == "calculate" {
+        let expression = args["expression"].as_str().unwrap_or("");
+        if expression.chars().any(|c| !c.is_numeric() && !"+-*/(). ".contains(c)) {
+            return Err("Expression invalide ou dangereuse.".to_string());
+        }
+        let output = std::process::Command::new("node")
+            .arg("plugins/calculator/index.js")
+            .arg(expression)
+            .output()
+            .map_err(|e| format!("Erreur d'exécution: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| e.to_string())?;
+        return Ok(json);
+    } else if plugin_id == "websearch" && tool_name == "search" {
+        let query = args["query"].as_str().unwrap_or("");
+        let output = std::process::Command::new("node")
+            .arg("plugins/websearch/index.js")
+            .arg(query)
+            .output()
+            .map_err(|e| format!("Erreur d'exécution: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| e.to_string())?;
+        return Ok(json);
+    }
+    Err(format!("Outil '{}' pour le plugin '{}' non trouvé.", tool_name, plugin_id))
 }
 
 // ─── App Entry Point ───────────────────────────────────────────────────────────
@@ -543,6 +683,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             check_ollama,
             list_ollama_models,
@@ -560,6 +701,9 @@ pub fn run() {
             generate_image,
             save_image_to_gallery,
             list_gallery_images,
+            delete_gallery_image,
+            list_plugins,
+            run_plugin_tool,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

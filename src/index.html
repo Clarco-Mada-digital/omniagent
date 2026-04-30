@@ -298,9 +298,18 @@
         <h3>🖼️ Galerie d'Art Locale</h3>
         <button class="icon-btn" onclick="document.getElementById('gallery-overlay').classList.remove('open')">✖</button>
       </div>
-      <div id="gallery-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; overflow-y: auto; flex-grow: 1; padding-right: 10px;">
+      <div id="gallery-grid">
         <!-- Images will be injected here -->
       </div>
+    </div>
+  </div>
+
+  <!-- Lightbox Premium -->
+  <div class="lightbox-overlay" id="lightbox">
+    <div class="lightbox-container">
+      <button class="lightbox-close" id="lightbox-close">✖</button>
+      <img src="" class="lightbox-img" id="lightbox-img">
+      <div class="lightbox-info" id="lightbox-info"></div>
     </div>
   </div>
 

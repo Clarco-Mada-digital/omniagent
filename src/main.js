@@ -8,6 +8,7 @@ const open = dialog ? dialog.open : null;
 
 let activeAgent = agents[0];
 let allMessages = [];
+let plugins = []; // Liste des plugins chargés
 let appConfig = { 
   openai_api_key: null, 
   anthropic_api_key: null, 
@@ -56,9 +57,47 @@ marked.setOptions({
   breaks: true
 });
 
+async function loadPlugins() {
+  try {
+    plugins = await invoke('list_plugins');
+    console.log("Plugins chargés:", plugins);
+  } catch (err) {
+    console.error("Erreur chargement plugins:", err);
+  }
+}
+
+// Fonction pour exécuter un outil détecté dans le texte
+async function handleToolCalls(text) {
+  // Format attendu : [[tool:plugin_id/tool_name?{"arg":"val"}]]
+  const toolRegex = /\[\[tool:([a-z0-9_-]+)\/([a-z0-9_-]+)\?({.*})\]\]/g;
+  let match;
+  let newText = text;
+  let hasCalls = false;
+
+  while ((match = toolRegex.exec(text)) !== null) {
+    hasCalls = true;
+    const [fullMatch, pluginId, toolName, argsStr] = match;
+    try {
+      const args = JSON.parse(argsStr);
+      console.log(`Exécution de l'outil: ${pluginId}/${toolName}`, args);
+      
+      const result = await invoke('run_plugin_tool', { plugin_id: pluginId, tool_name: toolName, args });
+      const resultStr = JSON.stringify(result);
+      
+      // Remplacer l'appel par le résultat dans le prompt suivant ou l'afficher
+      newText = newText.replace(fullMatch, `\n\n[RÉSULTAT DE L'OUTIL] : ${resultStr}\n\n`);
+    } catch (err) {
+      newText = newText.replace(fullMatch, `\n\n[ERREUR DE L'OUTIL] : ${err}\n\n`);
+    }
+  }
+  
+  return { hasCalls, newText };
+}
+
 async function init() {
   renderAgents();
   setupEventListeners();
+  await loadPlugins();
 
   // Charger la config et l'historique en parallèle
   const [loadedConfig, loadedHistory] = await Promise.all([
@@ -86,7 +125,49 @@ async function init() {
   if (appConfig.font_size) document.getElementById('settings-font-size').value = appConfig.font_size;
 
   selectAgent(agents[0].id, false);
+  await startListeners();
+}
 
+async function handleReActLoop(rawText, msgEl) {
+  const { hasCalls, newText } = await handleToolCalls(rawText);
+  
+  if (hasCalls) {
+    // Masquer les appels bruts et montrer les résultats
+    msgEl.dataset.raw = newText;
+    msgEl.innerHTML = marked.parse(newText);
+    
+    // On sauvegarde l'état actuel et on relance l'IA avec les résultats
+    allMessages.push({ role: 'ai', content: rawText, agent_id: activeAgent.id });
+    saveHistory();
+    
+    // Déclencher une nouvelle réponse automatique basée sur les résultats des outils
+    setTimeout(() => {
+      sendMessage(true); // true pour dire "poursuite automatique"
+    }, 500);
+  } else {
+    allMessages.push({ role: 'ai', content: rawText, agent_id: activeAgent.id, sources: [...currentUsedSources] });
+    if (currentUsedSources.length > 0) {
+      renderSourcesBadge(msgEl.parentElement, currentUsedSources);
+    }
+    currentUsedSources = [];
+    saveHistory();
+  }
+}
+
+function getToolsPrompt() {
+  if (plugins.length === 0) return "";
+  let p = "\n\n[SYSTÈME D'OUTILS DISPONIBLES]\n";
+  p += "Tu peux utiliser des outils en insérant ce tag exact dans ta réponse (remplace les paramètres) :\n";
+  plugins.forEach(plugin => {
+    plugin.tools.forEach(tool => {
+      p += `- [[tool:${plugin.id}/${tool.name}?${JSON.stringify(tool.parameters.properties)}]] : ${tool.description}\n`;
+    });
+  });
+  p += "\nImportant : Si tu utilises un outil, arrête ton message immédiatement après le tag. Le résultat te sera fourni.\n";
+  return p;
+}
+
+async function startListeners() {
   // Écouter les chunks de réponse (même canal pour Ollama et Cloud)
   await listen('ollama-chunk', (event) => {
     const { chunk, done } = event.payload;
@@ -119,7 +200,10 @@ async function init() {
       
       // Highlight code blocks
       currentMessageEl.querySelectorAll('pre code').forEach((block) => {
-        hljs.highlightElement(block);
+        if (!block.dataset.highlighted) {
+          hljs.highlightElement(block);
+          block.dataset.highlighted = 'true';
+        }
       });
       chatContainer.scrollTop = chatContainer.scrollHeight;
     }
@@ -127,19 +211,10 @@ async function init() {
     if (done) {
       document.getElementById('stop-btn').style.display = 'none';
       document.getElementById('send-btn').style.display = 'flex';
-      allMessages.push({ 
-        role: 'ai', 
-        content: currentMessageEl.dataset.raw, 
-        agent_id: activeAgent.id,
-        sources: [...currentUsedSources]
-      });
       
-      if (currentUsedSources.length > 0) {
-        renderSourcesBadge(currentMessageEl.parentElement, currentUsedSources);
-      }
+      const rawText = currentMessageEl.dataset.raw;
+      handleReActLoop(rawText, currentMessageEl);
       
-      currentUsedSources = []; // Reset
-      saveHistory();
       currentMessageEl = null; // Important: Empêcher les doublons si plusieurs events 'done' arrivent
     }
   });
@@ -462,8 +537,14 @@ async function generateArtistImage(prompt) {
   chatContainer.scrollTop = chatContainer.scrollHeight;
 
   try {
+    const provider = appConfig.default_provider || 'openai';
+    let apiKey = appConfig.openai_api_key;
+    if (provider === 'gemini') apiKey = appConfig.gemini_api_key;
+    else if (provider === 'openrouter') apiKey = appConfig.openrouter_api_key;
+
     const imageUrl = await invoke('generate_image', {
-      api_key: appConfig.openai_api_key,
+      provider,
+      api_key: apiKey,
       prompt: prompt,
       size: size
     });
@@ -513,15 +594,15 @@ function getApiKeyForProvider(provider) {
   }
 }
 
-async function sendMessage() {
-  let text = chatInput.value.trim();
+async function sendMessage(isAutoResponse = false) {
+  let text = isAutoResponse ? "[CONTINUATION AVEC RÉSULTAT]" : chatInput.value.trim();
   if (!text) return;
 
   let displayContent = null;
   let cmdUsed = null;
 
   // --- Système de Slash Commands ---
-  if (text.startsWith('/')) {
+  if (!isAutoResponse && text.startsWith('/')) {
     const parts = text.split(' ');
     const cmd = parts[0].toLowerCase();
     const content = parts.slice(1).join(' ');
@@ -580,7 +661,9 @@ async function sendMessage() {
   document.getElementById('send-btn').style.display = 'none';
   document.getElementById('stop-btn').style.display = 'flex';
   
-  addMessage('user', userVisibleText, [...attachedImages], true, cmdUsed);
+  if (!isAutoResponse) {
+    addMessage('user', userVisibleText, [...attachedImages], true, cmdUsed);
+  }
 
   currentMessageEl = document.createElement('div');
   currentMessageEl.className = 'typing-indicator';
@@ -602,7 +685,7 @@ async function sendMessage() {
     const agentMessages = allMessages.filter(m => m.agent_id === activeAgent.id).slice(-6);
     const context = agentMessages.map(m => `${m.role === 'user' ? 'Utilisateur' : 'Assistant'}: ${m.content}`).join('\n');
 
-    let fullPrompt = `${activeAgent.systemPrompt}\n\n`;
+    let fullPrompt = `${activeAgent.systemPrompt}\n${getToolsPrompt()}\n\n`;
 
     // Injection intelligente de la Base de Connaissance (RAG)
     if (indexedFiles.length > 0) {
@@ -960,40 +1043,77 @@ function setupEventListeners() {
 
   // --- Galerie ---
   document.getElementById('gallery-btn').addEventListener('click', async () => {
-    const galleryOverlay = document.getElementById('gallery-overlay');
-    galleryOverlay.classList.add('open');
+    document.getElementById('gallery-overlay').classList.add('open');
     await loadGallery();
   });
 
   async function loadGallery() {
     const grid = document.getElementById('gallery-grid');
-    grid.innerHTML = '<p style="color: var(--text-muted); text-align: center; grid-column: 1 / -1;">Chargement de la galerie...</p>';
+    grid.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-muted);">✨ Préparation de la galerie...</div>';
     
     try {
       const images = await invoke('list_gallery_images');
       if (images.length === 0) {
-        grid.innerHTML = '<p style="color: var(--text-muted); text-align: center; grid-column: 1 / -1;">Aucune image générée pour le moment.</p>';
+        grid.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-muted);">🎨 Votre collection est vide. Générez une œuvre pour commencer !</div>';
         return;
       }
       
       grid.innerHTML = images.map(path => {
-        // Tauri permet de charger des fichiers locaux via asset:// ou custom protocol si configuré
-        // Ici on utilise un chemin converti par Tauri
         const assetUrl = window.__TAURI__.tauri.convertFileSrc(path);
+        const fileName = path.split('/').pop();
         return `
-          <div style="position: relative; border-radius: 12px; overflow: hidden; border: 1px solid var(--glass-border); aspect-ratio: 1; cursor: pointer; transition: transform 0.2s;" 
-               onclick="window.openPath('${path.replace(/\\/g, '\\\\')}')"
-               onmouseover="this.style.transform='scale(1.03)'"
-               onmouseout="this.style.transform='scale(1)'">
-            <img src="${assetUrl}" style="width: 100%; height: 100%; object-fit: cover;" loading="lazy" />
-            <div style="position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.7); padding: 6px; font-size: 0.7rem; text-align: center;">Ouvrir localement</div>
+          <div class="gallery-card" onclick="window.openLightbox('${assetUrl}', '${path.replace(/\\/g, '\\\\')}')">
+            <img src="${assetUrl}" loading="lazy" />
+            <div class="gallery-card-overlay">
+              <div style="font-size: 0.7rem; color: white; opacity: 0.8; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${fileName}</div>
+              <div class="gallery-actions">
+                <button class="gallery-action-btn" title="Ouvrir" onclick="event.stopPropagation(); window.openLightbox('${assetUrl}', '${path.replace(/\\/g, '\\\\')}')">👁️</button>
+                <button class="gallery-action-btn" title="Dossier" onclick="event.stopPropagation(); window.openPath('${path.replace(/\\/g, '\\\\')}')">📂</button>
+                <button class="gallery-action-btn delete" title="Supprimer" onclick="event.stopPropagation(); window.deleteGalleryImage('${path.replace(/\\/g, '\\\\')}')">🗑️</button>
+              </div>
+            </div>
           </div>
         `;
       }).join('');
     } catch (err) {
-      grid.innerHTML = `<p style="color: #f87171; text-align: center; grid-column: 1 / -1;">Erreur lors du chargement : ${err}</p>`;
+      grid.innerHTML = `<div style="grid-column: 1/-1; color: var(--danger); text-align: center; padding: 20px;">Erreur : ${err}</div>`;
     }
   }
+
+  window.openLightbox = (url, path) => {
+    const lb = document.getElementById('lightbox');
+    const img = document.getElementById('lightbox-img');
+    const info = document.getElementById('lightbox-info');
+    
+    img.src = url;
+    info.innerText = `Fichier : ${path.split('/').pop()}`;
+    lb.classList.add('open');
+  };
+
+  window.closeLightbox = () => {
+    document.getElementById('lightbox').classList.remove('open');
+  };
+
+  window.deleteGalleryImage = async (path) => {
+    if (confirm("Voulez-vous vraiment supprimer cette œuvre de votre galerie ?")) {
+      try {
+        await invoke('delete_gallery_image', { path });
+        await loadGallery();
+        window.closeLightbox();
+      } catch (err) {
+        alert("Erreur lors de la suppression : " + err);
+      }
+    }
+  };
+
+  // Event Listeners Lightbox
+  const lbClose = document.getElementById('lightbox-close');
+  if (lbClose) lbClose.addEventListener('click', window.closeLightbox);
+  
+  const lbOverlay = document.getElementById('lightbox');
+  if (lbOverlay) lbOverlay.addEventListener('click', (e) => {
+    if (e.target.id === 'lightbox') window.closeLightbox();
+  });
 
   document.getElementById('settings-provider').addEventListener('change', () => {
     updateSettingsVisibility();

@@ -20,3 +20,10 @@ gallery/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# NOs agents IA
+.agents/
+.windsurf/
+skills-lock.json
+
+# Gestion de projets

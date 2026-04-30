@@ -28,10 +28,12 @@
 - ✅ Sprint 7 : Support des fichiers (Analyse de documents texte/code).
 - ✅ Sprint 8 : UX Avancée (Dictée vocale, Raccourcis clavier Ctrl+K/E/,).
 - ✅ Sprint 9 : Analyse d'images (Support des modèles Vision d'Ollama et OpenAI).
+- ✅ Sprint 10 : Recherche Locale (RAG).
+- ✅ Sprint 11 : Génération d'Images & Galerie.
+- ✅ Sprint 12 : Système de Plugins (Expansion des capacités par outils).
 
 ## Prochaine Action Immédiate
-- **Sprint 11** : Génération d'Images & Galerie. 🔄 En cours.
-- **Sprint 10** : Recherche Locale (RAG). ✅ Terminé.
+- **Maintenance & Polissage** : Optimisation des performances et correction de bugs mineurs. 🔄 En attente.
 
 ## Nouvelles Sources IA
 - **Ollama** : Local, 100% privé.
@@ -41,4 +43,6 @@
 - **Anthropic** : Claude 3.5 Sonnet.
 
 ## Instruction de Reprise pour un Agent IA
-> "Lis d'abord `docs/management/context_summary.md`, puis `sprint_backlog.md` et `product_backlog.md`. Agis comme Scrum Master et propose la prochaine tâche du Sprint 10."
+> "Lis d'abord `docs/management/context_summary.md`, puis `sprint_backlog.md` et `product_backlog.md`. 
+> **MANDAT TECHNIQUE** : Utilise impérativement les skills dans `.agents/skills/` (`/rust-skills` pour le Rust et `ui-ux-pro-max` pour le CSS/UX). 
+> Agis comme Scrum Master et propose la prochaine tâche du Sprint 11."

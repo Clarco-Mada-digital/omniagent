@@ -1,0 +1,22 @@
+{
+  "id": "calculator",
+  "name": "Calculatrice",
+  "description": "Exécute des calculs mathématiques.",
+  "version": "1.0.0",
+  "tools": [
+    {
+      "name": "calculate",
+      "description": "Calcule une expression mathématique. Utilise des opérateurs standards (+, -, *, /).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "expression": {
+            "type": "string",
+            "description": "L'expression mathématique à évaluer (ex: '25 * 4 + 10')."
+          }
+        },
+        "required": ["expression"]
+      }
+    }
+  ]
+}
