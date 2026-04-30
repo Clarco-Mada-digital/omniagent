@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#8b5cf6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3b82f6;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <!-- Background with rounded corners instead of circle so it fills the icon space nicely -->
+  <rect x="64" y="64" width="896" height="896" rx="224" ry="224" fill="url(#grad)"/>
+  
+  <!-- Outer glowing O -->
+  <path d="M512 256 C 370 256 256 370 256 512 C 256 654 370 768 512 768 C 654 768 768 654 768 512 C 768 370 654 256 512 256 Z M 512 370 C 590 370 654 434 654 512 C 654 590 590 654 512 654 C 434 654 370 590 370 512 C 370 434 434 370 512 370 Z" fill="#ffffff" />
+  
+  <!-- Inner AI core -->
+  <circle cx="512" cy="512" r="70" fill="#ffffff" />
+</svg>
