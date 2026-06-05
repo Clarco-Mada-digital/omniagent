@@ -1,16 +1,31 @@
-# Sprint 12 : Expansion & Outils (Plugins)
+# Sprint Backlog - Sprint 1 (Stabilité & Correctifs)
 
-**Objectif** : Transformer OmniAgent d'un simple chat en un assistant capable d'agir sur le monde via un système de plugins (Function Calling / Tools).
+**Période** : 02 Juin 2026 - 16 Juin 2026
+**Objectif** : Stabiliser l'application en corrigeant les bugs de duplication et en améliorant la gestion des erreurs.
 
-## Tâches
-- [x] **Task 12.1** : Définir l'architecture des plugins (Manifeste `plugin.json` et dossier `plugins/`).
-- [x] **Task 12.2** : Implémenter une commande Tauri `execute_plugin_tool` sécurisée en Rust.
-- [x] **Task 12.3** : Système de détection automatique des outils par les agents (Function Calling / ReAct loop).
-- [x] **Task 12.4** : Implémenter deux plugins de démonstration : 
-    - [x] 🧮 **Plugin Calculatrice** (Interprétation d'expressions mathématiques).
-    - [x] 🌐 **Plugin Web Search** (Recherche via Brave Search ou DuckDuckGo API - Version démo).
-- [ ] **Task 12.5** : UI de gestion des plugins (Activer/Désactiver).
+## Tableau de Bord Scrum
 
-## Statut
-- **Terminé** : Le système de plugins est opérationnel ! 🚀
-- **Note** : Les agents peuvent désormais appeler des outils externes en utilisant la syntaxe `[[tool:id/name?{args}]]`.
+| À faire | En cours | En revue | Terminé |
+|---|---|---|---|
+| | | | US-01 : Bug duplication messages |
+| | | | US-07 : Indicateur visuel chargement |
+| | | | US-06 : Gestion erreurs réseau |
+
+## Détails des Tâches du Sprint
+
+### [US-01] Bug duplication messages (Priorité : Bloquant)
+- Analyse de la racine du problème (Overlapping listeners & Global state)
+- Implémentation d'un arrêt de génération lors du changement d'agent
+- Isolation de l'élément de message par stream
+- Test de validation
+
+### [US-06] Gestion robuste des erreurs (Priorité : Majeure)
+- Catch des erreurs de timeout et de clés invalides
+- Notification utilisateur via toast ou message AI
+
+### [US-07] Indicateur visuel (Priorité : Mineure)
+- Ajout d'une barre de progression ou spinner lors de l'appel initial
+
+## Suivi des Risques & Bloqueurs
+- **Risque** : Changement d'API chez les fournisseurs cloud (OpenRouter/Gemini).
+- **Bloqueur** : Aucun pour le moment.

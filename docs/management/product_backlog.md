@@ -1,25 +1,31 @@
 # Product Backlog - OmniAgent
 
-**Role : Product Owner**
+**Rôle : Product Manager**
 
-## User Stories & Features
-1. ~~**[PRIO: HAUTE]** En tant qu'utilisateur, je veux que l'agent sélectionné soit automatiquement configuré avec le meilleur modèle Ollama disponible.~~ ✅
-2. ~~**[PRIO: HAUTE]** En tant qu'utilisateur, je veux voir les réponses s'afficher en streaming pour une sensation de réactivité.~~ ✅
-3. ~~**[PRIO: MOYENNE]** En tant qu'utilisateur, je veux pouvoir sauvegarder mes conversations localement.~~ ✅
-4. ~~**[PRIO: MOYENNE]** En tant que développeur, je veux que les agents soient définis dans des fichiers séparés pour faciliter l'ajout de nouveaux domaines.~~ ✅
-5. ~~**[PRIO: HAUTE]** En tant qu'utilisateur, je veux pouvoir basculer vers des modèles Cloud (OpenAI/Anthropic) si Ollama n'est pas disponible.~~ ✅
-6. ~~**[PRIO: HAUTE]** En tant qu'utilisateur, je veux un écran de paramètres pour configurer mes clés API et choisir local vs cloud par agent.~~ ✅
-7. ~~**[PRIO: MOYENNE]** En tant qu'utilisateur, je veux une détection automatique de la disponibilité d'Ollama au lancement.~~ ✅
-8. ~~**[PRIO: HAUTE]** En tant qu'utilisateur, je veux que l'IA puisse analyser mes fichiers locaux (RAG).~~ ✅
-9. ~~**[PRIO: MOYENNE]** En tant qu'utilisateur, je veux pouvoir générer des images via un agent dédié.~~ ✅
-10. ~~**[PRIO: HAUTE]** En tant qu'utilisateur, je veux pouvoir utiliser Gemini, OpenRouter et Anthropic.~~ ✅
-11. **[PRIO: BASSE]** En tant qu'utilisateur, je veux un système de plugins pour ajouter des outils (Recherche web, Calculatrice). 🔄
+## User Stories & Tâches Techniques
 
-## Roadmap
-- **MVP** : Chat fonctionnel avec Ollama et sélection d'agents ✅
-- **v1.1** : Streaming et Modularisation ✅
-- **v1.2** : Refonte Design "Glassmorphism v2" ✅
-- **v1.3** : Historique et Persistance ✅
-- **v1.5** : Vision & Interaction (Terminé) ✅
-- **v1.6** : Recherche Locale (RAG) 🔄 Prochain
-- **v1.7** : Génération d'Images (DALL-E) 📅 Planifié
+| ID | Type | Description | Priorité | Est. (SP) | Statut |
+|---|---|---|---|---|---|
+| US-01 | Bug | Correction de la duplication des messages lors du changement d'agent pendant un stream | Bloquant | 3 | Terminé |
+| US-02 | Feature | Système de conversations multiples par agent (Threads) | Haute | 8 | À faire |
+| US-03 | Sécurité | Chiffrement des clés API via le trousseau d'accès système (Keychain) | Haute | 5 | À faire |
+| US-04 | Feature | Recherche Web (Plugin search) - Intégration complète (Réelle API) | Haute | 5 | À faire |
+| US-05 | Perf | Migration vers une base vectorielle locale simple (ex: LanceDB ou faiss-rs) pour le RAG | Moyenne | 13 | À faire |
+| US-06 | Bug | Gestion robuste des erreurs réseau et fallback automatique vers Ollama | Majeure | 3 | Terminé |
+| US-07 | UX | Ajout d'un indicateur visuel de chargement global et état de connexion | Mineure | 2 | Terminé |
+| US-08 | Feature | Support de modèles de vision locaux (Llava) via Ollama | Majeure | 5 | À faire |
+| US-09 | Feature | Exportation PDF/Markdown enrichie de l'historique complet | Moyenne | 3 | À faire |
+
+## Roadmap Stratégique 2026
+
+### Sprint 1 : Stabilité & Fiabilité (En cours - Échéance : 16/06)
+- **Objectif** : Zéro bug de duplication et gestion d'erreur exemplaire.
+- **Livrables** : Version 1.5.1 stable.
+
+### Sprint 2 : Sécurité & Web (Échéance : 30/06)
+- **Objectif** : Sécuriser les secrets utilisateurs et ouvrir l'IA sur le web.
+- **Livrables** : Intégration Keychain (Rust) + Plugin WebSearch fonctionnel (Brave Search ou Google).
+
+### Sprint 3 : Intelligence Contextuelle (Échéance : 15/07)
+- **Objectif** : Multi-conversations et RAG haute performance.
+- **Livrables** : UI Multi-threads + Backend Vector DB.

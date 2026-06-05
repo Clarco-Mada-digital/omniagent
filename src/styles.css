@@ -216,6 +216,31 @@ body.dragging {
 
 
 /* Main Content Area */
+/* --- Top Loading Bar (US-07) --- */
+.top-loading-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0%;
+  height: 3px;
+  background: linear-gradient(90deg, #8b5cf6, #3b82f6, #8b5cf6);
+  background-size: 200% 100%;
+  z-index: 1000;
+  transition: width 0.3s ease, opacity 0.3s ease;
+  box-shadow: 0 0 10px rgba(139, 92, 246, 0.5);
+  opacity: 0;
+}
+
+.top-loading-bar.active {
+  opacity: 1;
+  animation: loading-shimmer 2s infinite linear;
+}
+
+@keyframes loading-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
 .main-wrapper {
   flex-grow: 1;
   display: flex;
@@ -314,10 +339,72 @@ body.dragging {
 .message.ai {
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
+  align-self: flex-start;
   border-bottom-left-radius: 4px;
 }
 
-/* Image grid in message */
+.message.ai.error-message {
+  border-color: rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.05);
+  color: #fca5a5;
+  max-width: 80%;
+}
+
+.error-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.error-container strong {
+  color: #f87171;
+  font-size: 1rem;
+}
+
+.error-container p {
+  margin: 0;
+  font-size: 0.9rem;
+  opacity: 0.9;
+}
+
+.error-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 5px;
+}
+
+.error-action-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: white;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.error-action-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.error-action-btn.primary {
+  background: var(--accent-neon);
+  border-color: var(--accent-neon);
+  color: white;
+}
+
+.error-action-btn.primary:hover {
+  filter: brightness(1.2);
+  box-shadow: 0 0 10px var(--accent-neon);
+}
+
+.error-container small {
+  font-size: 0.7rem;
+  opacity: 0.5;
+  margin-top: 5px;
+  word-break: break-all;
+}/* Image grid in message */
 .message-images {
   display: flex;
   flex-wrap: wrap;

@@ -24,6 +24,7 @@ struct OllamaChunk {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct StreamPayload {
+    pub request_id: String,
     pub chunk: String,
     pub done: bool,
 }
@@ -41,11 +42,17 @@ fn stop_generation(state: tauri::State<'_, AppState>) {
     state.stop_flag.store(true, Ordering::Relaxed);
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ChatMessage {
-    role: String,
-    content: String,
-    agent_id: String,
+    pub role: String,
+    pub content: String,
+    pub agent_id: String,
+    pub images: Option<Vec<String>>,
+    pub cmd_used: Option<String>,
+    pub sources: Option<Vec<String>>,
+    #[serde(rename = "type")]
+    pub msg_type: Option<String>,
+    pub local_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -54,6 +61,7 @@ pub struct AppConfig {
     pub anthropic_api_key: Option<String>,
     pub gemini_api_key: Option<String>,
     pub openrouter_api_key: Option<String>,
+    pub ollama_url: Option<String>,
     pub default_provider: String, // "ollama" | "openai" | "anthropic" | "gemini" | "openrouter"
     pub favorites: Option<Vec<String>>,
     pub custom_shortcuts: Option<HashMap<String, String>>,
@@ -69,6 +77,7 @@ impl Default for AppConfig {
             anthropic_api_key: None,
             gemini_api_key: None,
             openrouter_api_key: None,
+            ollama_url: Some("http://localhost:11434".to_string()),
             default_provider: "ollama".to_string(),
             favorites: Some(Vec::new()),
             custom_shortcuts: Some(HashMap::new()),
@@ -113,11 +122,15 @@ fn get_gallery_dir(app: &AppHandle) -> PathBuf {
 // ─── Ollama Commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
-async fn list_ollama_models(state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
-    let res = state.client.get("http://localhost:11434/api/tags")
+async fn list_ollama_models(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
+    let config = load_config(app);
+    let base_url = config.ollama_url.unwrap_or_else(|| "http://localhost:11434".to_string());
+    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
+
+    let res = state.client.get(&url)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Impossible de lister les modèles sur {}: {}", url, e))?;
     
     let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
     let mut models = Vec::new();
@@ -132,8 +145,11 @@ async fn list_ollama_models(state: tauri::State<'_, AppState>) -> Result<Vec<Str
 }
 
 #[tauri::command]
-async fn check_ollama(state: tauri::State<'_, AppState>) -> Result<bool, String> {
-    Ok(state.client.get("http://localhost:11434")
+async fn check_ollama(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let config = load_config(app);
+    let base_url = config.ollama_url.unwrap_or_else(|| "http://localhost:11434".to_string());
+    
+    Ok(state.client.get(&base_url)
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -144,35 +160,52 @@ async fn check_ollama(state: tauri::State<'_, AppState>) -> Result<bool, String>
 async fn ask_ollama_stream(
     app: AppHandle, 
     state: tauri::State<'_, AppState>,
+    request_id: String,
     model: String, 
     prompt: String, 
     images: Option<Vec<String>>
 ) -> Result<(), String> {
     state.stop_flag.store(false, Ordering::Relaxed);
+    
+    // Récupérer l'URL Ollama depuis la config ou utiliser le défaut
+    let config = load_config(app.clone());
+    let base_url = config.ollama_url.unwrap_or_else(|| "http://localhost:11434".to_string());
+    let url = format!("{}/api/generate", base_url.trim_end_matches('/'));
+
     let res = state.client
-        .post("http://localhost:11434/api/generate")
+        .post(&url)
         .json(&OllamaRequest { model: model.clone(), prompt, images, stream: true })
         .send()
         .await
-        .map_err(|e| format!("Connexion Ollama échouée: {}", e))?;
+        .map_err(|e| format!("Connexion Ollama échouée sur {}: {}", url, e))?;
 
     if !res.status().is_success() {
-        if res.status() == 404 {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        
+        // Essayer de parser le message d'erreur JSON d'Ollama
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(err) = json["error"].as_str() {
+                return Err(format!("Ollama ({}): {}", status, err));
+            }
+        }
+        
+        if status == 404 {
             return Err(format!("Le modèle '{}' n'est pas installé. Lancez 'ollama pull {}' dans votre terminal.", model, model));
         }
-        return Err(format!("Ollama erreur: {}", res.status()));
+        return Err(format!("Ollama erreur {}: {}", status, body));
     }
 
     let mut stream = res.bytes_stream();
     while let Some(item) = stream.next().await {
         if state.stop_flag.load(Ordering::Relaxed) {
-            app.emit("ollama-chunk", StreamPayload { chunk: "... [Arrêté]".to_string(), done: true }).ok();
+            app.emit("ollama-chunk", StreamPayload { request_id: request_id.clone(), chunk: "... [Arrêté]".to_string(), done: true }).ok();
             break;
         }
         let bytes = item.map_err(|e| e.to_string())?;
         for line in String::from_utf8_lossy(&bytes).lines() {
             if let Ok(chunk) = serde_json::from_str::<OllamaChunk>(line) {
-                app.emit("ollama-chunk", StreamPayload { chunk: chunk.response, done: chunk.done })
+                app.emit("ollama-chunk", StreamPayload { request_id: request_id.clone(), chunk: chunk.response, done: chunk.done })
                     .map_err(|e| e.to_string())?;
             }
         }
@@ -216,6 +249,7 @@ struct OpenAIChunk {
 async fn ask_cloud_stream(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
+    request_id: String,
     provider: String,
     api_key: String,
     model: String,
@@ -289,9 +323,11 @@ async fn ask_cloud_stream(
     }
 
     let mut stream = res.bytes_stream();
+    let mut is_done = false;
     while let Some(item) = stream.next().await {
+        if is_done { break; }
         if state.stop_flag.load(Ordering::Relaxed) {
-            app.emit("ollama-chunk", StreamPayload { chunk: "... [Arrêté]".to_string(), done: true }).ok();
+            app.emit("ollama-chunk", StreamPayload { request_id: request_id.clone(), chunk: "... [Arrêté]".to_string(), done: true }).ok();
             break;
         }
         let bytes = item.map_err(|e| e.to_string())?;
@@ -302,7 +338,8 @@ async fn ask_cloud_stream(
             if line.starts_with("data: ") {
                 let data = &line["data: ".len()..];
                 if data == "[DONE]" {
-                    app.emit("ollama-chunk", StreamPayload { chunk: "".to_string(), done: true })
+                    is_done = true;
+                    app.emit("ollama-chunk", StreamPayload { request_id: request_id.clone(), chunk: "".to_string(), done: true })
                         .map_err(|e| e.to_string())?;
                     break;
                 }
@@ -310,8 +347,9 @@ async fn ask_cloud_stream(
                     if let Some(choice) = chunk.choices.first() {
                         let text = choice.delta.content.clone().unwrap_or_default();
                         let done = choice.finish_reason.is_some();
+                        if done { is_done = true; }
                         if !text.is_empty() || done {
-                            app.emit("ollama-chunk", StreamPayload { chunk: text, done })
+                            app.emit("ollama-chunk", StreamPayload { request_id: request_id.clone(), chunk: text, done })
                                 .map_err(|e| e.to_string())?;
                         }
                     }
@@ -327,16 +365,31 @@ async fn ask_cloud_stream(
 #[tauri::command]
 fn save_history(app: AppHandle, messages: Vec<ChatMessage>) -> Result<(), String> {
     let path = get_history_path(&app);
-    fs::write(path, serde_json::to_string(&messages).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
+    println!("Sauvegarde de l'historique vers: {:?}", path);
+    fs::write(&path, serde_json::to_string(&messages).map_err(|e| e.to_string())?)
+        .map_err(|e| {
+            let err = format!("Erreur d'écriture historique: {}", e);
+            eprintln!("{}", err);
+            err
+        })
 }
 
 #[tauri::command]
 fn load_history(app: AppHandle) -> Result<Vec<ChatMessage>, String> {
     let path = get_history_path(&app);
-    if !path.exists() { return Ok(Vec::new()); }
-    serde_json::from_str(&fs::read_to_string(path).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
+    println!("Chargement de l'historique depuis: {:?}", path);
+    if !path.exists() { 
+        println!("Le fichier d'historique n'existe pas encore.");
+        return Ok(Vec::new()); 
+    }
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let messages: Vec<ChatMessage> = serde_json::from_str(&content).map_err(|e| {
+        let err = format!("Erreur désérialisation historique: {}. Contenu: {}", e, content);
+        eprintln!("{}", err);
+        err
+    })?;
+    println!("{} messages chargés avec succès.", messages.len());
+    Ok(messages)
 }
 
 // ─── Config Commands ───────────────────────────────────────────────────────────
@@ -478,8 +531,9 @@ async fn generate_image(
             .map_err(|e| e.to_string())?;
 
         if !res.status().is_success() {
+            let status = res.status();
             let body = res.text().await.unwrap_or_default();
-            return Err(format!("Erreur OpenAI: {} - {}", res.status(), body));
+            return Err(format!("Erreur OpenAI: {} - {}", status, body));
         }
 
         let json: OpenAIImageResponse = res.json().await.map_err(|e| e.to_string())?;
@@ -500,8 +554,9 @@ async fn generate_image(
             .map_err(|e| e.to_string())?;
 
         if !res.status().is_success() {
+            let status = res.status();
             let body = res.text().await.unwrap_or_default();
-            return Err(format!("Erreur Gemini Image: {} - {}", res.status(), body));
+            return Err(format!("Erreur Gemini Image: {} - {}", status, body));
         }
 
         let json: OpenAIImageResponse = res.json().await.map_err(|e| e.to_string())?;
@@ -521,8 +576,9 @@ async fn generate_image(
             .map_err(|e| e.to_string())?;
 
         if !res.status().is_success() {
+            let status = res.status();
             let body = res.text().await.unwrap_or_default();
-            return Err(format!("Erreur OpenRouter Image: {} - {}", res.status(), body));
+            return Err(format!("Erreur OpenRouter Image: {} - {}", status, body));
         }
 
         // OpenRouter might return a different format or proxy OpenAI

@@ -60,6 +60,14 @@
         </div>
       </div>
 
+      <div class="settings-group" id="group-ollama">
+        <label>Configuration Ollama (Local)</label>
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <input type="text" id="settings-ollama-url" placeholder="http://localhost:11434" />
+          <p style="font-size: 0.7rem; color: var(--text-muted);">L'adresse par défaut est http://localhost:11434</p>
+        </div>
+      </div>
+
       <div class="settings-group" id="group-openai">
         <label>Clé API OpenAI</label>
         <div style="display: flex; gap: 8px;">
@@ -205,6 +213,7 @@
 
 
   <div class="main-wrapper">
+    <div id="top-loading-bar" class="top-loading-bar"></div>
     <main class="main-content">
       <header class="header">
         <div class="agent-info">

@@ -14,6 +14,7 @@ let appConfig = {
   anthropic_api_key: null, 
   gemini_api_key: null,
   openrouter_api_key: null,
+  ollama_url: 'http://localhost:11434',
   default_provider: 'ollama',
   preferred_models: {
     ollama: 'llama3',
@@ -27,6 +28,8 @@ let appConfig = {
 };
 let ollamaAvailable = false;
 let isThinking = false;
+let currentRequestId = null;
+let currentMessageEl = null;
 let attachedFile = null; // { name: string, content: string }
 let attachedImages = []; // Array of base64 strings
 let indexedFiles = []; // Array of { name, path, content }
@@ -38,13 +41,12 @@ let currentUsedSources = []; // Pour l'affichage des sources RAG
 const chatContainer = document.getElementById('chat-container');
 const chatInput = document.getElementById('chat-input');
 const sendBtn = document.getElementById('send-btn');
+const topLoadingBar = document.getElementById('top-loading-bar');
 const agentList = document.getElementById('agent-list');
 const activeAgentName = document.getElementById('active-agent-name');
 const activeAgentDesc = document.getElementById('active-agent-desc');
 const ollamaStatus = document.getElementById('ollama-status');
 const settingsPanel = document.getElementById('settings-panel');
-
-let currentMessageEl = null;
 
 // Configuration de Marked pour utiliser Highlight.js
 marked.setOptions({
@@ -105,6 +107,9 @@ async function init() {
     invoke('load_history').catch(() => [])
   ]);
   
+  console.log("Configuration chargée:", loadedConfig);
+  console.log("Historique chargé:", loadedHistory.length, "messages");
+  
   // Fusionner pour garder les valeurs par défaut (ex: preferred_models initiaux)
   appConfig = { 
       ...appConfig, 
@@ -136,21 +141,26 @@ async function handleReActLoop(rawText, msgEl) {
     msgEl.dataset.raw = newText;
     msgEl.innerHTML = marked.parse(newText);
     
-    // On sauvegarde l'état actuel et on relance l'IA avec les résultats
-    allMessages.push({ role: 'ai', content: rawText, agent_id: activeAgent.id });
-    saveHistory();
+    // Mettre à jour le message IA avec le contenu incluant les résultats d'outils
+    const lastMsg = allMessages[allMessages.length - 1];
+    if (lastMsg && lastMsg.role === 'ai') {
+        lastMsg.content = newText;
+        saveHistory();
+    }
     
     // Déclencher une nouvelle réponse automatique basée sur les résultats des outils
     setTimeout(() => {
       sendMessage(true); // true pour dire "poursuite automatique"
     }, 500);
   } else {
-    allMessages.push({ role: 'ai', content: rawText, agent_id: activeAgent.id, sources: [...currentUsedSources] });
-    if (currentUsedSources.length > 0) {
-      renderSourcesBadge(msgEl.parentElement, currentUsedSources);
+    // Si des sources ont été utilisées, on les ajoute au dernier message
+    const lastMsg = allMessages[allMessages.length - 1];
+    if (lastMsg && lastMsg.role === 'ai' && currentUsedSources.length > 0) {
+        lastMsg.sources = [...currentUsedSources];
+        renderSourcesBadge(msgEl.parentElement, currentUsedSources);
+        saveHistory();
     }
     currentUsedSources = [];
-    saveHistory();
   }
 }
 
@@ -170,7 +180,10 @@ function getToolsPrompt() {
 async function startListeners() {
   // Écouter les chunks de réponse (même canal pour Ollama et Cloud)
   await listen('ollama-chunk', (event) => {
-    const { chunk, done } = event.payload;
+    const { request_id, chunk, done } = event.payload;
+    
+    // Ignorer si ce n'est pas la requête actuelle
+    if (request_id !== currentRequestId) return;
     if (!currentMessageEl) return;
     
     if (currentMessageEl.classList.contains('typing-indicator')) {
@@ -195,6 +208,11 @@ async function startListeners() {
     }
 
     if (contentToAppend) {
+      // Progression visuelle lors de la réception des chunks (US-07)
+      if (topLoadingBar && topLoadingBar.classList.contains('active')) {
+        topLoadingBar.style.width = '70%';
+      }
+
       currentMessageEl.dataset.raw += contentToAppend;
       currentMessageEl.innerHTML = marked.parse(currentMessageEl.dataset.raw);
       
@@ -209,13 +227,34 @@ async function startListeners() {
     }
     
     if (done) {
+      // Terminer l'indicateur de chargement (US-07)
+      if (topLoadingBar) {
+        topLoadingBar.style.width = '100%';
+        setTimeout(() => {
+          topLoadingBar.classList.remove('active');
+          topLoadingBar.style.width = '0%';
+        }, 500);
+      }
+
       document.getElementById('stop-btn').style.display = 'none';
       document.getElementById('send-btn').style.display = 'flex';
       
-      const rawText = currentMessageEl.dataset.raw;
-      handleReActLoop(rawText, currentMessageEl);
+    const rawText = currentMessageEl.dataset.raw;
+      const msgEl = currentMessageEl;
       
-      currentMessageEl = null; // Important: Empêcher les doublons si plusieurs events 'done' arrivent
+      // On sauvegarde ici avant de vider currentMessageEl pour US-01
+      allMessages.push({ 
+        role: 'ai', 
+        content: rawText, 
+        agent_id: activeAgent.id, 
+        sources: [...currentUsedSources] 
+      });
+      saveHistory();
+
+      currentMessageEl = null; 
+      currentRequestId = null;
+      
+      handleReActLoop(rawText, msgEl);
     }
   });
 }
@@ -295,7 +334,14 @@ function applyTypography() {
   document.documentElement.style.setProperty('--app-font-size', appConfig.font_size || '15px');
 }
 
-window.selectAgent = (id, shouldWelcome = true) => {
+window.selectAgent = async (id, shouldWelcome = true) => {
+  // Arrêter toute génération en cours lors du changement d'agent
+  if (currentMessageEl) {
+    await invoke('stop_generation');
+    currentRequestId = null;
+    currentMessageEl = null;
+  }
+
   activeAgent = agents.find(a => a.id === id);
   renderAgents();
   activeAgentName.innerText = activeAgent.name;
@@ -328,7 +374,7 @@ function renderChatHistory() {
     return;
   }
   msgs.forEach(m => {
-    const el = addMessage(m.role, m.content, m.images, false, m.cmdUsed);
+    const el = addMessage(m.role, m.content, m.images, false, m.cmd_used);
     if (m.sources && m.sources.length > 0) {
       renderSourcesBadge(el.closest('.message-wrapper'), m.sources);
     }
@@ -350,7 +396,7 @@ function renderSourcesBadge(wrapper, sources) {
   wrapper.appendChild(sourcesContainer);
 }
 
-function addMessage(role, text, images = null, shouldSave = true, cmdUsed = null) {
+function addMessage(role, text, images = null, shouldSave = true, cmd_used = null) {
   // Enlever l'état vide si présent
   const emptyState = chatContainer.querySelector('.empty-state');
   if (emptyState) chatContainer.removeChild(emptyState);
@@ -362,10 +408,10 @@ function addMessage(role, text, images = null, shouldSave = true, cmdUsed = null
   msgEl.className = `message ${role}`;
   
   // Badge de commande magique
-  if (cmdUsed) {
+  if (cmd_used) {
     const cmdBadge = document.createElement('span');
     cmdBadge.className = 'msg-cmd-badge';
-    cmdBadge.innerText = `via ${cmdUsed}`;
+    cmdBadge.innerText = `via ${cmd_used}`;
     msgEl.appendChild(cmdBadge);
   }
   if (images && images.length > 0) {
@@ -441,7 +487,7 @@ function addMessage(role, text, images = null, shouldSave = true, cmdUsed = null
       content: text, 
       agent_id: activeAgent.id, 
       images: images, 
-      cmdUsed: cmdUsed 
+      cmd_used: cmd_used 
     });
     saveHistory();
   }
@@ -599,7 +645,7 @@ async function sendMessage(isAutoResponse = false) {
   if (!text) return;
 
   let displayContent = null;
-  let cmdUsed = null;
+  let cmd_used = null;
 
   // --- Système de Slash Commands ---
   if (!isAutoResponse && text.startsWith('/')) {
@@ -629,18 +675,24 @@ async function sendMessage(isAutoResponse = false) {
       }
       text = `${agentCmd.prompt}${content}`;
       displayContent = content || cmd;
-      cmdUsed = cmd;
+      cmd_used = cmd;
     } else if (activeAgent.id === 'translator' && cmd.length === 3) {
       const langCode = cmd.substring(1);
       text = `Traduis précisément ce texte vers la langue correspondant au code "${langCode}" : \n---\n${content}\n---`;
       displayContent = content;
-      cmdUsed = cmd;
+      cmd_used = cmd;
     }
   }
 
   // Masquer le badge après envoi
   const badgeEl = document.getElementById('active-command-badge');
   if (badgeEl) badgeEl.style.display = 'none';
+
+  // Activer l'indicateur de chargement (US-07)
+  if (topLoadingBar) {
+    topLoadingBar.style.width = '30%';
+    topLoadingBar.classList.add('active');
+  }
 
   // Gestion spécifique pour l'agent Artiste
   if (activeAgent.id === 'artist') {
@@ -662,8 +714,11 @@ async function sendMessage(isAutoResponse = false) {
   document.getElementById('stop-btn').style.display = 'flex';
   
   if (!isAutoResponse) {
-    addMessage('user', userVisibleText, [...attachedImages], true, cmdUsed);
+    addMessage('user', userVisibleText, [...attachedImages], true, cmd_used);
   }
+
+  // Générer un ID de requête unique
+  currentRequestId = Math.random().toString(36).substring(2, 15);
 
   currentMessageEl = document.createElement('div');
   currentMessageEl.className = 'typing-indicator';
@@ -717,56 +772,161 @@ async function sendMessage(isAutoResponse = false) {
     fullPrompt += `Utilisateur: ${text}\n\nAssistant:`;
 
     if (provider === 'ollama') {
-      await invoke('ask_ollama_stream', { 
-        model: activeAgent.model, 
-        prompt: `${fullPrompt}${fullPromptToSend}`,
-        images: imagesToSend
-      });
-    } else if (provider !== 'none') {
-      const apiKey = getApiKeyForProvider(provider);
-      if (!apiKey) {
-        throw new Error(`Clé API manquante pour le fournisseur ${provider}.`);
+      try {
+        await invoke('ask_ollama_stream', { 
+          requestId: currentRequestId,
+          model: activeAgent.model, 
+          prompt: `${fullPrompt}${fullPromptToSend}`,
+          images: imagesToSend
+        });
+      } catch (err) {
+        handleError(err, 'ollama', { fullPrompt, fullPromptToSend, imagesToSend });
       }
-
-      const badge = document.createElement('span');
-      badge.className = 'cloud-badge';
-      
-      let displayModel = appConfig.preferred_models[provider] || activeAgent.model;
-      
-      if (provider === 'openai') { badge.innerText = '☁ OpenAI'; }
-      else if (provider === 'gemini') { badge.innerText = '✨ Gemini'; }
-      else if (provider === 'openrouter') { badge.innerText = '🌐 OpenRouter'; }
-      else if (provider === 'anthropic') { badge.innerText = '🦉 Anthropic'; }
-      
-      chatContainer.appendChild(badge);
-
-      await invoke('ask_cloud_stream', {
-        provider: provider,
-        apiKey: apiKey,
-        model: displayModel,
-        systemPrompt: activeAgent.systemPrompt,
-        userMessage: fullPromptToSend,
-        images: imagesToSend
-      });
+    } else if (provider !== 'none') {
+      try {
+        await callCloudStream(provider, activeAgent.systemPrompt, fullPromptToSend, imagesToSend);
+      } catch (err) {
+        handleError(err, provider, { fullPrompt, fullPromptToSend, imagesToSend });
+      }
     } else {
       currentMessageEl.className = 'message ai';
       currentMessageEl.innerText = '⚠️ Aucun service IA disponible. Vérifiez Ollama ou ajoutez une clé API dans les paramètres.';
+      currentRequestId = null;
+      currentMessageEl = null;
+      document.getElementById('stop-btn').style.display = 'none';
+      document.getElementById('send-btn').style.display = 'flex';
     }
   } catch (err) {
-
-    if (currentMessageEl) {
-      currentMessageEl.className = 'message ai';
-      currentMessageEl.innerText = `Erreur: ${err}`;
-    }
-    console.error(err);
+    handleError(err, 'system');
   }
+}
+
+function handleError(err, provider, context = null) {
+  console.error(`Erreur [${provider}]:`, err);
+  
+  if (topLoadingBar) {
+    topLoadingBar.classList.remove('active');
+    topLoadingBar.style.width = '0%';
+  }
+
+  if (currentMessageEl) {
+    currentMessageEl.className = 'message ai error-message';
+    
+    let errorTitle = "Erreur de communication";
+    let errorMsg = err;
+    let suggestions = "";
+
+    if (err.includes("Connexion Ollama échouée")) {
+      errorTitle = "Ollama est hors ligne";
+      errorMsg = `L'application ne parvient pas à contacter Ollama sur ${appConfig.ollama_url}.`;
+      if (appConfig.openai_api_key || appConfig.gemini_api_key) {
+        suggestions = `<button class="error-action-btn" onclick="window.retryWithCloud()">Réessayer avec le Cloud ☁️</button>`;
+      }
+    } else if (err.includes("llama-server binary not found")) {
+      errorTitle = "Installation Ollama corrompue";
+      errorMsg = "Le moteur d'inférence (llama-server) est manquant. Votre installation Ollama est incomplète.";
+      suggestions = `
+        <button class="error-action-btn primary" onclick="window.copyFixCommand()">Copier la commande de réparation 📋</button>
+        <button class="error-action-btn" onclick="window.retryWithCloud()">Utiliser le Cloud en attendant ☁️</button>
+      `;
+    } else if (err.includes("401") || err.includes("clé API")) {
+      errorTitle = "Clé API Invalide";
+      errorMsg = `La clé pour ${provider} semble incorrecte ou expirée.`;
+      suggestions = `<button class="error-action-btn" onclick="document.getElementById('settings-btn').click()">Ouvrir les Paramètres ⚙️</button>`;
+    } else if (err.includes("429") || err.includes("quota")) {
+      errorTitle = "Limite de quota atteinte";
+      errorMsg = `Vous avez dépassé votre quota chez ${provider}.`;
+      if (ollamaAvailable) {
+        suggestions = `<button class="error-action-btn" onclick="window.retryWithOllama()">Basculer sur Ollama (Local) 🏠</button>`;
+      }
+    } else if (err.includes("404")) {
+      errorTitle = "Modèle introuvable";
+      errorMsg = `Le modèle sélectionné n'est pas disponible chez ${provider}.`;
+    }
+
+    currentMessageEl.innerHTML = `
+      <div class="error-container">
+        <strong>⚠️ ${errorTitle}</strong>
+        <p>${errorMsg}</p>
+        <div class="error-actions">
+          <button class="error-action-btn primary" onclick="window.retryLastMessage()">Réessayer 🔄</button>
+          ${suggestions}
+        </div>
+        <small>Détail technique : ${err}</small>
+      </div>
+    `;
+  }
+
+  currentRequestId = null;
+  currentMessageEl = null;
+  document.getElementById('stop-btn').style.display = 'none';
+  document.getElementById('send-btn').style.display = 'flex';
+}
+
+window.retryLastMessage = () => {
+  const lastUserMsg = allMessages.filter(m => m.role === 'user').pop();
+  if (lastUserMsg) {
+    // Supprimer le message d'erreur et le dernier message IA si vide
+    const errorEls = chatContainer.querySelectorAll('.error-message');
+    errorEls.forEach(el => el.remove());
+    
+    chatInput.value = lastUserMsg.content;
+    sendMessage();
+  }
+};
+
+window.retryWithCloud = async () => {
+  appConfig.default_provider = appConfig.openai_api_key ? 'openai' : 'gemini';
+  updateSystemStatus();
+  window.retryLastMessage();
+};
+
+window.retryWithOllama = async () => {
+  appConfig.default_provider = 'ollama';
+  updateSystemStatus();
+  window.retryLastMessage();
+};
+
+window.copyFixCommand = () => {
+  const cmd = "brew reinstall ollama";
+  navigator.clipboard.writeText(cmd);
+  alert("Commande copiée : " + cmd + "\n\nExécutez-la dans votre terminal pour réparer Ollama.");
+};
+
+async function callCloudStream(provider, systemPrompt, userMessage, images) {
+  const apiKey = getApiKeyForProvider(provider);
+  if (!apiKey) {
+    throw new Error(`Clé API manquante pour le fournisseur ${provider}.`);
+  }
+
+  const badge = document.createElement('span');
+  badge.className = 'cloud-badge';
+  
+  let displayModel = appConfig.preferred_models[provider] || activeAgent.model;
+  
+  if (provider === 'openai') { badge.innerText = '☁ OpenAI (Fallback)'; }
+  else if (provider === 'gemini') { badge.innerText = '✨ Gemini (Fallback)'; }
+  else if (provider === 'openrouter') { badge.innerText = '🌐 OpenRouter'; }
+  else if (provider === 'anthropic') { badge.innerText = '🦉 Anthropic'; }
+  
+  chatContainer.appendChild(badge);
+
+  return await invoke('ask_cloud_stream', {
+    requestId: currentRequestId,
+    provider: provider,
+    apiKey: apiKey,
+    model: displayModel,
+    systemPrompt: systemPrompt,
+    userMessage: userMessage,
+    images: images
+  });
 }
 
 window.exportChat = async (format) => {
   document.getElementById('export-menu').classList.remove('open');
   try {
     const savedPath = await invoke('export_conversation', {
-      agentId: activeAgent.id,
+      agent_id: activeAgent.id,
       agentName: activeAgent.name,
       format,
     });
@@ -1030,6 +1190,7 @@ function setupEventListeners() {
   document.getElementById('settings-btn').addEventListener('click', () => {
     settingsPanel.classList.toggle('open');
     document.getElementById('settings-provider').value = appConfig.default_provider;
+    document.getElementById('settings-ollama-url').value = appConfig.ollama_url || 'http://localhost:11434';
     document.getElementById('settings-openai-key').value = appConfig.openai_api_key || '';
     document.getElementById('settings-gemini-key').value = appConfig.gemini_api_key || '';
     document.getElementById('settings-openrouter-key').value = appConfig.openrouter_api_key || '';
@@ -1123,6 +1284,7 @@ function setupEventListeners() {
   function updateSettingsVisibility() {
     const provider = document.getElementById('settings-provider').value;
     const groups = {
+      'ollama': 'group-ollama',
       'openai': 'group-openai',
       'gemini': 'group-gemini',
       'openrouter': 'group-openrouter',
@@ -1223,6 +1385,7 @@ function setupEventListeners() {
 
   window.saveSettings = async () => {
     appConfig.default_provider = document.getElementById('settings-provider').value;
+    appConfig.ollama_url = document.getElementById('settings-ollama-url').value || 'http://localhost:11434';
     appConfig.openai_api_key = document.getElementById('settings-openai-key').value;
     appConfig.gemini_api_key = document.getElementById('settings-gemini-key').value;
     appConfig.openrouter_api_key = document.getElementById('settings-openrouter-key').value;
