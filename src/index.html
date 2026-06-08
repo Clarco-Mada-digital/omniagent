@@ -28,6 +28,7 @@
         <label>Fournisseur IA par défaut</label>
         <select id="settings-provider">
           <option value="ollama">Ollama (Local)</option>
+          <option value="lmstudio">LM Studio (Local)</option>
           <option value="openai">OpenAI (Cloud)</option>
           <option value="gemini">Google Gemini (Cloud)</option>
           <option value="openrouter">OpenRouter (Multi-Cloud)</option>
@@ -65,6 +66,14 @@
         <div style="display: flex; flex-direction: column; gap: 8px;">
           <input type="text" id="settings-ollama-url" placeholder="http://localhost:11434" />
           <p style="font-size: 0.7rem; color: var(--text-muted);">L'adresse par défaut est http://localhost:11434</p>
+        </div>
+      </div>
+
+      <div class="settings-group" id="group-lmstudio" style="display: none;">
+        <label>Configuration LM Studio (Local)</label>
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <input type="text" id="settings-lmstudio-url" placeholder="http://localhost:1234" />
+          <p style="font-size: 0.7rem; color: var(--text-muted);">L'adresse par défaut est http://localhost:1234</p>
         </div>
       </div>
 

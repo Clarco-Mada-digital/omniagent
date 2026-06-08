@@ -62,7 +62,8 @@ pub struct AppConfig {
     pub gemini_api_key: Option<String>,
     pub openrouter_api_key: Option<String>,
     pub ollama_url: Option<String>,
-    pub default_provider: String, // "ollama" | "openai" | "anthropic" | "gemini" | "openrouter"
+    pub lmstudio_url: Option<String>,
+    pub default_provider: String, // "ollama" | "openai" | "anthropic" | "gemini" | "openrouter" | "lmstudio"
     pub favorites: Option<Vec<String>>,
     pub custom_shortcuts: Option<HashMap<String, String>>,
     pub preferred_models: Option<HashMap<String, String>>,
@@ -78,6 +79,7 @@ impl Default for AppConfig {
             gemini_api_key: None,
             openrouter_api_key: None,
             ollama_url: Some("http://localhost:11434".to_string()),
+            lmstudio_url: Some("http://localhost:1234".to_string()),
             default_provider: "ollama".to_string(),
             favorites: Some(Vec::new()),
             custom_shortcuts: Some(HashMap::new()),
@@ -122,15 +124,11 @@ fn get_gallery_dir(app: &AppHandle) -> PathBuf {
 // ─── Ollama Commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
-async fn list_ollama_models(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
-    let config = load_config(app);
-    let base_url = config.ollama_url.unwrap_or_else(|| "http://localhost:11434".to_string());
-    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-
-    let res = state.client.get(&url)
+async fn list_ollama_models(state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
+    let res = state.client.get("http://localhost:11434/api/tags")
         .send()
         .await
-        .map_err(|e| format!("Impossible de lister les modèles sur {}: {}", url, e))?;
+        .map_err(|e| e.to_string())?;
     
     let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
     let mut models = Vec::new();
@@ -145,11 +143,8 @@ async fn list_ollama_models(app: AppHandle, state: tauri::State<'_, AppState>) -
 }
 
 #[tauri::command]
-async fn check_ollama(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<bool, String> {
-    let config = load_config(app);
-    let base_url = config.ollama_url.unwrap_or_else(|| "http://localhost:11434".to_string());
-    
-    Ok(state.client.get(&base_url)
+async fn check_ollama(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.client.get("http://localhost:11434")
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -166,34 +161,18 @@ async fn ask_ollama_stream(
     images: Option<Vec<String>>
 ) -> Result<(), String> {
     state.stop_flag.store(false, Ordering::Relaxed);
-    
-    // Récupérer l'URL Ollama depuis la config ou utiliser le défaut
-    let config = load_config(app.clone());
-    let base_url = config.ollama_url.unwrap_or_else(|| "http://localhost:11434".to_string());
-    let url = format!("{}/api/generate", base_url.trim_end_matches('/'));
-
     let res = state.client
-        .post(&url)
+        .post("http://localhost:11434/api/generate")
         .json(&OllamaRequest { model: model.clone(), prompt, images, stream: true })
         .send()
         .await
-        .map_err(|e| format!("Connexion Ollama échouée sur {}: {}", url, e))?;
+        .map_err(|e| format!("Connexion Ollama échouée: {}", e))?;
 
     if !res.status().is_success() {
-        let status = res.status();
-        let body = res.text().await.unwrap_or_default();
-        
-        // Essayer de parser le message d'erreur JSON d'Ollama
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-            if let Some(err) = json["error"].as_str() {
-                return Err(format!("Ollama ({}): {}", status, err));
-            }
-        }
-        
-        if status == 404 {
+        if res.status() == 404 {
             return Err(format!("Le modèle '{}' n'est pas installé. Lancez 'ollama pull {}' dans votre terminal.", model, model));
         }
-        return Err(format!("Ollama erreur {}: {}", status, body));
+        return Err(format!("Ollama erreur: {}", res.status()));
     }
 
     let mut stream = res.bytes_stream();
@@ -729,6 +708,93 @@ async fn run_plugin_tool(
 
 // ─── App Entry Point ───────────────────────────────────────────────────────────
 
+#[tauri::command]
+async fn ask_lmstudio_stream(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+    model: String,
+    prompt: String,
+) -> Result<(), String> {
+    state.stop_flag.store(false, Ordering::Relaxed);
+    
+    let config = load_config(app.clone());
+    let base_url = config.lmstudio_url.unwrap_or_else(|| "http://localhost:1234".to_string());
+    let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+
+    let res = state.client
+        .post(&url)
+        .json(&serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Connexion LM Studio échouée sur {}: {}", url, e))?;
+
+    if !res.status().is_success() {
+        return Err(format!("LM Studio erreur {}: {}", res.status(), res.text().await.unwrap_or_default()));
+    }
+
+    let mut stream = res.bytes_stream();
+    while let Some(item) = stream.next().await {
+        if state.stop_flag.load(Ordering::Relaxed) { break; }
+        
+        let bytes = item.map_err(|e| e.to_string())?;
+        let text = String::from_utf8_lossy(&bytes);
+        
+        for line in text.lines() {
+            if line.starts_with("data: ") {
+                let data = &line[6..];
+                if data == "[DONE]" { break; }
+                
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                        app.emit("stream-response", StreamPayload {
+                            request_id: request_id.clone(),
+                            chunk: content.to_string(),
+                            done: false,
+                        }).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+        }
+    }
+    
+    app.emit("stream-response", StreamPayload {
+        request_id: request_id.clone(),
+        chunk: "".to_string(),
+        done: true,
+    }).map_err(|e| e.to_string())?;
+    
+    app.emit("stream-finished", request_id).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn list_lmstudio_models(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
+    let config = load_config(app);
+    let base_url = config.lmstudio_url.unwrap_or_else(|| "http://localhost:1234".to_string());
+    let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+
+    let res = state.client.get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Impossible de lister les modèles LM Studio sur {}: {}", url, e))?;
+    
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let mut models = Vec::new();
+    if let Some(models_array) = json["data"].as_array() {
+        for m in models_array {
+            if let Some(id) = m["id"].as_str() {
+                models.push(id.to_string());
+            }
+        }
+    }
+    Ok(models)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -742,6 +808,8 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             check_ollama,
+            list_lmstudio_models,
+            ask_lmstudio_stream,
             list_ollama_models,
             ask_ollama_stream,
             ask_cloud_stream,

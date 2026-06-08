@@ -15,9 +15,11 @@ let appConfig = {
   gemini_api_key: null,
   openrouter_api_key: null,
   ollama_url: 'http://localhost:11434',
+  lmstudio_url: 'http://localhost:1234',
   default_provider: 'ollama',
   preferred_models: {
     ollama: 'llama3',
+    lmstudio: 'local-model',
     openai: 'gpt-4o',
     gemini: 'gemini-1.5-flash',
     openrouter: 'meta-llama/llama-3-8b-instruct',
@@ -271,6 +273,10 @@ function updateSystemStatus() {
       statusEl.innerHTML = '● Local Offline';
       statusEl.style.color = '#f87171';
     }
+  } else if (provider === 'lmstudio') {
+    // LM Studio est local, pas besoin de clé
+    statusEl.innerHTML = '● LM Studio (Local)';
+    statusEl.style.color = '#4ade80'; // Vert comme Ollama
   } else {
     const key = getApiKeyForProvider(provider);
     if (key && key.length > 10) {
@@ -737,10 +743,16 @@ async function sendMessage(isAutoResponse = false) {
   document.getElementById('file-preview').innerHTML = '';
 
   try {
-    const agentMessages = allMessages.filter(m => m.agent_id === activeAgent.id).slice(-6);
-    const context = agentMessages.map(m => `${m.role === 'user' ? 'Utilisateur' : 'Assistant'}: ${m.content}`).join('\n');
+    // Augmentation de la fenêtre de contexte (12 messages au lieu de 6)
+    const agentMessages = allMessages.filter(m => m.agent_id === activeAgent.id).slice(-12);
+    
+    // Formatage plus clair pour l'IA
+    const context = agentMessages.map(m => {
+      const role = m.role === 'user' ? 'Utilisateur' : 'Assistant';
+      return `[${role}]: ${m.content}`;
+    }).join('\n\n');
 
-    let fullPrompt = `${activeAgent.systemPrompt}\n${getToolsPrompt()}\n\n`;
+    let fullPrompt = `INSTRUCTIONS SYSTÈME :\n${activeAgent.systemPrompt}\n${getToolsPrompt()}\n\n`;
 
     // Injection intelligente de la Base de Connaissance (RAG)
     if (indexedFiles.length > 0) {
@@ -763,24 +775,50 @@ async function sendMessage(isAutoResponse = false) {
       }
     }
 
-    fullPrompt += `Historique:\n${context}\n\n`;
+    fullPrompt += `CONTEXTE DE LA CONVERSATION (Historique récent) :\n${context}\n\n`;
     
     if (fileToSend) {
-      fullPrompt += `FICHIER JOINT (${fileToSend.name}) :\n---\n${fileToSend.content}\n---\n\n`;
+      fullPrompt += `DOCUMENT JOINT POUR CETTE REQUÊTE (${fileToSend.name}) :\n---\n${fileToSend.content}\n---\n\n`;
     }
 
-    fullPrompt += `Utilisateur: ${text}\n\nAssistant:`;
+    fullPrompt += `DERNIÈRE QUESTION DE L'UTILISATEUR :\n${text}\n\nAssistant:`;
 
     if (provider === 'ollama') {
       try {
+        // Fallback intelligent si le modèle de l'agent n'existe pas en local
+        let modelToUse = activeAgent.model;
+        const localModels = await invoke('list_ollama_models').catch(() => []);
+        if (!localModels.includes(modelToUse) && appConfig.preferred_models?.ollama) {
+          console.warn(`Modèle agent '${modelToUse}' non trouvé. Utilisation du modèle préféré: ${appConfig.preferred_models.ollama}`);
+          modelToUse = appConfig.preferred_models.ollama;
+        }
+
         await invoke('ask_ollama_stream', { 
           requestId: currentRequestId,
-          model: activeAgent.model, 
+          model: modelToUse, 
           prompt: `${fullPrompt}${fullPromptToSend}`,
           images: imagesToSend
         });
       } catch (err) {
         handleError(err, 'ollama', { fullPrompt, fullPromptToSend, imagesToSend });
+      }
+    } else if (provider === 'lmstudio') {
+      try {
+        // Fallback intelligent pour LM Studio
+        let modelToUse = activeAgent.model;
+        const localModels = await invoke('list_lmstudio_models').catch(() => []);
+        if (!localModels.includes(modelToUse) && appConfig.preferred_models?.lmstudio) {
+          console.warn(`Modèle agent '${modelToUse}' non trouvé sur LM Studio. Utilisation du modèle préféré: ${appConfig.preferred_models.lmstudio}`);
+          modelToUse = appConfig.preferred_models.lmstudio;
+        }
+
+        await invoke('ask_lmstudio_stream', { 
+          requestId: currentRequestId,
+          model: modelToUse, 
+          prompt: `${fullPrompt}${fullPromptToSend}`
+        });
+      } catch (err) {
+        handleError(err, 'lmstudio', { fullPrompt, fullPromptToSend });
       }
     } else if (provider !== 'none') {
       try {
@@ -822,13 +860,10 @@ function handleError(err, provider, context = null) {
       if (appConfig.openai_api_key || appConfig.gemini_api_key) {
         suggestions = `<button class="error-action-btn" onclick="window.retryWithCloud()">Réessayer avec le Cloud ☁️</button>`;
       }
-    } else if (err.includes("llama-server binary not found")) {
-      errorTitle = "Installation Ollama corrompue";
-      errorMsg = "Le moteur d'inférence (llama-server) est manquant. Votre installation Ollama est incomplète.";
-      suggestions = `
-        <button class="error-action-btn primary" onclick="window.copyFixCommand()">Copier la commande de réparation 📋</button>
-        <button class="error-action-btn" onclick="window.retryWithCloud()">Utiliser le Cloud en attendant ☁️</button>
-      `;
+    } else if (err.includes("Connexion LM Studio échouée")) {
+      errorTitle = "LM Studio est hors ligne";
+      errorMsg = `L'application ne parvient pas à contacter LM Studio sur ${appConfig.lmstudio_url}.`;
+      suggestions = `<button class="error-action-btn" onclick="document.getElementById('settings-btn').click()">Vérifier l'URL ⚙️</button>`;
     } else if (err.includes("401") || err.includes("clé API")) {
       errorTitle = "Clé API Invalide";
       errorMsg = `La clé pour ${provider} semble incorrecte ou expirée.`;
@@ -885,12 +920,6 @@ window.retryWithOllama = async () => {
   appConfig.default_provider = 'ollama';
   updateSystemStatus();
   window.retryLastMessage();
-};
-
-window.copyFixCommand = () => {
-  const cmd = "brew reinstall ollama";
-  navigator.clipboard.writeText(cmd);
-  alert("Commande copiée : " + cmd + "\n\nExécutez-la dans votre terminal pour réparer Ollama.");
 };
 
 async function callCloudStream(provider, systemPrompt, userMessage, images) {
@@ -1190,7 +1219,6 @@ function setupEventListeners() {
   document.getElementById('settings-btn').addEventListener('click', () => {
     settingsPanel.classList.toggle('open');
     document.getElementById('settings-provider').value = appConfig.default_provider;
-    document.getElementById('settings-ollama-url').value = appConfig.ollama_url || 'http://localhost:11434';
     document.getElementById('settings-openai-key').value = appConfig.openai_api_key || '';
     document.getElementById('settings-gemini-key').value = appConfig.gemini_api_key || '';
     document.getElementById('settings-openrouter-key').value = appConfig.openrouter_api_key || '';
@@ -1285,6 +1313,7 @@ function setupEventListeners() {
     const provider = document.getElementById('settings-provider').value;
     const groups = {
       'ollama': 'group-ollama',
+      'lmstudio': 'group-lmstudio',
       'openai': 'group-openai',
       'gemini': 'group-gemini',
       'openrouter': 'group-openrouter',
@@ -1330,6 +1359,13 @@ function setupEventListeners() {
         { id: 'google/gemini-flash-1.5', name: 'Gemini 1.5 Flash (Peu coûteux)' },
         { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet' }
       ];
+    } else if (provider === 'lmstudio') {
+      try {
+        const models = await invoke('list_lmstudio_models');
+        options = models.map(m => ({ id: m, name: m }));
+      } catch {
+        options = [{ id: 'local-model', name: 'local-model (fallback)' }];
+      }
     } else if (provider === 'anthropic') {
       options = [
         { id: 'claude-3-5-sonnet-latest', name: 'Claude 3.5 Sonnet' },
@@ -1386,6 +1422,7 @@ function setupEventListeners() {
   window.saveSettings = async () => {
     appConfig.default_provider = document.getElementById('settings-provider').value;
     appConfig.ollama_url = document.getElementById('settings-ollama-url').value || 'http://localhost:11434';
+    appConfig.lmstudio_url = document.getElementById('settings-lmstudio-url').value || 'http://localhost:1234';
     appConfig.openai_api_key = document.getElementById('settings-openai-key').value;
     appConfig.gemini_api_key = document.getElementById('settings-gemini-key').value;
     appConfig.openrouter_api_key = document.getElementById('settings-openrouter-key').value;
@@ -1453,6 +1490,13 @@ function setupEventListeners() {
 
   document.getElementById('stop-btn').addEventListener('click', async () => {
     await invoke('stop_generation');
+    
+    // Réinitialiser la barre de progression
+    if (topLoadingBar) {
+      topLoadingBar.classList.remove('active');
+      topLoadingBar.style.width = '0%';
+    }
+    
     document.getElementById('stop-btn').style.display = 'none';
     document.getElementById('send-btn').style.display = 'flex';
   });
