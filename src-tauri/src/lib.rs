@@ -5,6 +5,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use std::fs;
 use std::path::PathBuf;
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
 
 // ─── Data Structures ──────────────────────────────────────────────────────────
 
@@ -69,6 +72,7 @@ pub struct AppConfig {
     pub preferred_models: Option<HashMap<String, String>>,
     pub font_family: Option<String>,
     pub font_size: Option<String>,
+    pub mcp_servers: Option<Vec<McpServerConfig>>,
 }
 
 impl Default for AppConfig {
@@ -86,8 +90,355 @@ impl Default for AppConfig {
             preferred_models: Some(HashMap::new()),
             font_family: Some("'Inter', sans-serif".to_string()),
             font_size: Some("15px".to_string()),
+            mcp_servers: Some(Vec::new()),
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct McpServerConfig {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    pub args: Option<Vec<String>>,
+    pub env: Option<HashMap<String, String>>,
+    pub enabled: Option<bool>,
+    pub permissions: Option<McpPermissions>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct McpPermissions {
+    pub tools: Option<bool>,
+    pub resources: Option<bool>,
+    pub prompts: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct McpToolDescriptor {
+    pub server_id: String,
+    pub server_name: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub input_schema: serde_json::Value,
+}
+
+fn mcp_enabled_servers(config: &AppConfig) -> Vec<McpServerConfig> {
+    config
+        .mcp_servers
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| s.enabled.unwrap_or(true))
+        .collect()
+}
+
+fn mcp_tools_allowed(server: &McpServerConfig) -> bool {
+    server.permissions.as_ref().and_then(|p| p.tools).unwrap_or(true)
+}
+
+fn mcp_resources_allowed(server: &McpServerConfig) -> bool {
+    server.permissions.as_ref().and_then(|p| p.resources).unwrap_or(true)
+}
+
+fn mcp_prompts_allowed(server: &McpServerConfig) -> bool {
+    server.permissions.as_ref().and_then(|p| p.prompts).unwrap_or(true)
+}
+
+fn is_filesystem_server(server: &McpServerConfig) -> bool {
+    if server.name.to_lowercase().contains("filesystem") || server.id.to_lowercase().contains("filesystem") {
+        return true;
+    }
+    let args = server.args.clone().unwrap_or_default();
+    args.iter().any(|a| a.contains("@modelcontextprotocol/server-filesystem"))
+}
+
+fn filesystem_root_from_server(server: &McpServerConfig) -> PathBuf {
+    let args = server.args.clone().unwrap_or_default();
+    args.last()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn filesystem_list_directory(root: &PathBuf, path: Option<String>) -> Result<serde_json::Value, String> {
+    let rel = path.unwrap_or_default();
+    let mut target = root.clone();
+    if !rel.is_empty() {
+        target.push(rel);
+    }
+    if !target.exists() {
+        return Err("Chemin introuvable.".to_string());
+    }
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(target).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let meta = entry.metadata().map_err(|e| e.to_string())?;
+        entries.push(serde_json::json!({
+            "name": entry.file_name().to_string_lossy(),
+            "path": entry.path().to_string_lossy(),
+            "type": if meta.is_dir() { "directory" } else { "file" },
+            "size": meta.len()
+        }));
+    }
+    Ok(serde_json::json!({ "entries": entries }))
+}
+
+fn filesystem_read_file(root: &PathBuf, path: String) -> Result<serde_json::Value, String> {
+    let mut target = root.clone();
+    target.push(path);
+    let content = fs::read_to_string(&target).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "content": content }))
+}
+
+fn mcp_send_message(
+    stdin: &mut std::process::ChildStdin,
+    message: &serde_json::Value,
+) -> Result<(), String> {
+    let body = serde_json::to_vec(message).map_err(|e| e.to_string())?;
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    stdin.write_all(header.as_bytes()).map_err(|e| e.to_string())?;
+    stdin.write_all(&body).map_err(|e| e.to_string())?;
+    stdin.flush().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn mcp_read_message(stdout: &mut std::process::ChildStdout) -> Result<serde_json::Value, String> {
+    let mut header = Vec::new();
+    let mut buf = [0u8; 1];
+    loop {
+        stdout.read_exact(&mut buf).map_err(|e| e.to_string())?;
+        header.push(buf[0]);
+        if header.ends_with(b"\r\n\r\n") {
+            break;
+        }
+        if header.len() > 8192 {
+            return Err("En-tête MCP trop long.".to_string());
+        }
+    }
+
+    let header_str = String::from_utf8(header).map_err(|e| e.to_string())?;
+    let mut content_length = None;
+    for line in header_str.lines() {
+        if let Some(v) = line.strip_prefix("Content-Length:") {
+            content_length = v.trim().parse::<usize>().ok();
+        }
+    }
+    let len = content_length.ok_or_else(|| "Content-Length manquant.".to_string())?;
+    let mut body = vec![0u8; len];
+    stdout.read_exact(&mut body).map_err(|e| e.to_string())?;
+    serde_json::from_slice(&body).map_err(|e| e.to_string())
+}
+
+fn mcp_request(
+    server: &McpServerConfig,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let server = server.clone();
+    let server_name = server.name.clone();
+    let method = method.to_string();
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let result = (|| -> Result<serde_json::Value, String> {
+            let mut command = Command::new(&server.command);
+            let mut args = server.args.clone().unwrap_or_default();
+            if server.command == "npx" && !args.iter().any(|a| a == "--yes" || a == "-y") {
+                args.insert(0, "--yes".to_string());
+            }
+
+            let mut child = command
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .envs(server.env.clone().unwrap_or_default())
+                .spawn()
+                .map_err(|e| format!("Impossible de lancer MCP {}: {}", server.name, e))?;
+
+            let mut stdin = child.stdin.take().ok_or("stdin MCP indisponible")?;
+            let mut stdout = child.stdout.take().ok_or("stdout MCP indisponible")?;
+
+            let init = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "clientInfo": { "name": "OmniAgent", "version": env!("CARGO_PKG_VERSION") },
+                    "capabilities": { "tools": {} }
+                }
+            });
+            mcp_send_message(&mut stdin, &init)?;
+            let _ = mcp_read_message(&mut stdout)?;
+            let initialized = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            });
+            mcp_send_message(&mut stdin, &initialized)?;
+
+            let request = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": method,
+                "params": params
+            });
+            mcp_send_message(&mut stdin, &request)?;
+            let response = mcp_read_message(&mut stdout)?;
+            let _ = child.kill();
+            Ok(response)
+        })();
+        let _ = tx.send(result);
+    });
+
+    rx.recv_timeout(std::time::Duration::from_secs(20))
+        .map_err(|_| format!("Timeout MCP sur le serveur '{}'.", server_name))?
+}
+
+#[tauri::command]
+fn test_mcp_server(app: AppHandle, server_id: String) -> Result<serde_json::Value, String> {
+    let config = load_config(app);
+    let server = mcp_enabled_servers(&config)
+        .into_iter()
+        .find(|s| s.id == server_id)
+        .ok_or_else(|| format!("Serveur MCP '{}' introuvable.", server_id))?;
+
+    if is_filesystem_server(&server) {
+        return Ok(serde_json::json!({
+            "server_id": server.id,
+            "server_name": server.name,
+            "ok": true,
+            "tools_count": 2,
+            "mode": "native-filesystem"
+        }));
+    }
+
+    let response = mcp_request(&server, "tools/list", serde_json::json!({}))?;
+    let tools = response["result"]["tools"].as_array().map(|a| a.len()).unwrap_or(0);
+    Ok(serde_json::json!({
+        "server_id": server.id,
+        "server_name": server.name,
+        "ok": true,
+        "tools_count": tools
+    }))
+}
+
+#[tauri::command]
+fn list_mcp_servers(app: AppHandle) -> Result<Vec<McpServerConfig>, String> {
+    let config = load_config(app);
+    Ok(config.mcp_servers.unwrap_or_default())
+}
+
+#[tauri::command]
+fn save_mcp_servers(app: AppHandle, servers: Vec<McpServerConfig>) -> Result<(), String> {
+    let mut config = load_config(app.clone());
+    config.mcp_servers = Some(servers);
+    save_config(app, config)
+}
+
+#[tauri::command]
+fn list_mcp_tools(app: AppHandle) -> Result<Vec<McpToolDescriptor>, String> {
+    let config = load_config(app);
+    let mut tools = Vec::new();
+    for server in mcp_enabled_servers(&config) {
+        if !mcp_tools_allowed(&server) {
+            continue;
+        }
+        if is_filesystem_server(&server) {
+            tools.push(McpToolDescriptor {
+                server_id: server.id.clone(),
+                server_name: server.name.clone(),
+                name: "list_directory".to_string(),
+                description: Some("Liste le contenu d'un dossier à partir de la racine autorisée.".to_string()),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Chemin relatif depuis la racine configurée." }
+                    }
+                }),
+            });
+            tools.push(McpToolDescriptor {
+                server_id: server.id.clone(),
+                server_name: server.name.clone(),
+                name: "read_file".to_string(),
+                description: Some("Lit un fichier à partir de la racine autorisée.".to_string()),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Chemin relatif du fichier." }
+                    }
+                }),
+            });
+            continue;
+        }
+        let response = mcp_request(&server, "tools/list", serde_json::json!({}))?;
+        let items = response["result"]["tools"].as_array().cloned().unwrap_or_default();
+        for tool in items {
+            tools.push(McpToolDescriptor {
+                server_id: server.id.clone(),
+                server_name: server.name.clone(),
+                name: tool["name"].as_str().unwrap_or_default().to_string(),
+                description: tool["description"].as_str().map(|s| s.to_string()),
+                input_schema: tool["inputSchema"].clone(),
+            });
+        }
+    }
+    Ok(tools)
+}
+
+#[tauri::command]
+fn list_mcp_server_status(app: AppHandle, server_id: String) -> Result<serde_json::Value, String> {
+    let config = load_config(app);
+    let server = mcp_enabled_servers(&config)
+        .into_iter()
+        .find(|s| s.id == server_id)
+        .ok_or_else(|| format!("Serveur MCP '{}' introuvable.", server_id))?;
+
+    Ok(serde_json::json!({
+        "id": server.id,
+        "name": server.name,
+        "tools": mcp_tools_allowed(&server),
+        "resources": mcp_resources_allowed(&server),
+        "prompts": mcp_prompts_allowed(&server)
+    }))
+}
+
+#[tauri::command]
+fn run_mcp_tool(
+    app: AppHandle,
+    server_id: String,
+    tool_name: String,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let config = load_config(app);
+    let server = mcp_enabled_servers(&config)
+        .into_iter()
+        .find(|s| s.id == server_id)
+        .ok_or_else(|| format!("Serveur MCP '{}' introuvable.", server_id))?;
+    if !mcp_tools_allowed(&server) {
+        return Err(format!("Les outils sont désactivés pour le serveur MCP '{}'.", server.name));
+    }
+
+    if is_filesystem_server(&server) {
+        let root = filesystem_root_from_server(&server);
+        match tool_name.as_str() {
+            "list_directory" => {
+                let path = args["path"].as_str().map(|s| s.to_string());
+                return filesystem_list_directory(&root, path);
+            }
+            "read_file" => {
+                let path = args["path"].as_str().unwrap_or("").to_string();
+                return filesystem_read_file(&root, path);
+            }
+            _ => return Err(format!("Outil filesystem inconnu: {}", tool_name)),
+        }
+    }
+
+    let response = mcp_request(&server, "tools/call", serde_json::json!({
+        "name": tool_name,
+        "arguments": args
+    }))?;
+    Ok(response)
 }
 
 // ─── Path Helpers ──────────────────────────────────────────────────────────────
@@ -119,6 +470,12 @@ fn get_gallery_dir(app: &AppHandle) -> PathBuf {
         fs::create_dir_all(&p).unwrap();
     }
     p
+}
+
+#[tauri::command]
+fn get_desktop_dir(app: AppHandle) -> Result<String, String> {
+    let path = app.path().desktop_dir().map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 // ─── Ollama Commands ───────────────────────────────────────────────────────────
@@ -828,6 +1185,13 @@ pub fn run() {
             delete_gallery_image,
             list_plugins,
             run_plugin_tool,
+            list_mcp_servers,
+            save_mcp_servers,
+            test_mcp_server,
+            list_mcp_server_status,
+            get_desktop_dir,
+            list_mcp_tools,
+            run_mcp_tool,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

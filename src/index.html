@@ -123,6 +123,22 @@
       </div>
 
       <div class="settings-group">
+        <label>🔌 Serveurs MCP</label>
+        <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 8px;">
+          Ajoutez des serveurs MCP, puis l’agent pourra lister et utiliser leurs outils automatiquement.
+        </p>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="save-btn" id="open-mcp-manager" style="background: rgba(255,255,255,0.05); color: white; border: 1px solid var(--glass-border);">
+            Gérer les serveurs
+          </button>
+          <button class="save-btn" id="open-mcp-import" style="background: rgba(255,255,255,0.05); color: white; border: 1px solid var(--glass-border);">
+            Parcourir les presets
+          </button>
+        </div>
+        <div id="mcp-server-summary" style="margin-top: 8px; font-size: 0.75rem; color: var(--text-muted);"></div>
+      </div>
+
+      <div class="settings-group">
         <label>⌨️ Raccourcis Personnalisés (Alt + ...)</label>
         <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 5px;">
           <div style="display: flex; align-items: center; gap: 10px;">
@@ -141,6 +157,74 @@
       </div>
 
       <button class="save-btn" id="settings-save">Enregistrer</button>
+    </div>
+  </div>
+
+  <div class="settings-overlay mcp-overlay" id="mcp-manager-panel">
+    <div class="settings-card mcp-card">
+      <div class="settings-header">
+        <h3>Gestion MCP</h3>
+        <button class="icon-btn" id="mcp-manager-close">✕</button>
+      </div>
+
+      <div class="mcp-layout">
+        <div class="mcp-column">
+          <div class="settings-group">
+            <label>Recherche de presets</label>
+            <input type="text" id="mcp-search" placeholder="Filesystem, GitHub, Postgres..." />
+          </div>
+
+          <div class="settings-group">
+            <div class="mcp-section-title">
+              <label>Presets recommandés</label>
+              <span class="mcp-help">Ajout rapide</span>
+            </div>
+            <div id="mcp-preset-list" class="mcp-preset-list"></div>
+          </div>
+        </div>
+
+        <div class="mcp-column">
+          <div class="settings-group">
+            <div class="mcp-section-title">
+              <label>Ajouter un MCP custom</label>
+              <span class="mcp-help">Configuration manuelle</span>
+            </div>
+
+            <div class="mcp-form">
+              <input type="hidden" id="mcp-custom-id" />
+              <input type="text" id="mcp-custom-name" placeholder="Nom du serveur" />
+              <select id="mcp-custom-transport">
+                <option value="stdio">stdio</option>
+                <option value="http">http</option>
+                <option value="sse">sse</option>
+              </select>
+              <input type="text" id="mcp-custom-command" placeholder="Commande" />
+              <input type="text" id="mcp-custom-args" placeholder='Args JSON ex: ["-y","@modelcontextprotocol/server-filesystem","/tmp"]' />
+              <textarea id="mcp-custom-env" rows="4" placeholder='Env JSON ex: {"KEY":"value"}'></textarea>
+              <div class="mcp-permissions mcp-permissions-form">
+                <label><input type="checkbox" id="mcp-perm-tools" checked /> Tools</label>
+                <label><input type="checkbox" id="mcp-perm-resources" checked /> Resources</label>
+                <label><input type="checkbox" id="mcp-perm-prompts" checked /> Prompts</label>
+              </div>
+              <div class="mcp-form-actions">
+                <button class="save-btn" id="mcp-custom-save" type="button">Ajouter</button>
+                <button class="save-btn" id="mcp-custom-reset" type="button" style="background: rgba(255,255,255,0.05); color: white; border: 1px solid var(--glass-border);">Réinitialiser</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <div class="mcp-section-title">
+              <label>Serveurs configurés</label>
+              <span class="mcp-help">Activer, modifier, supprimer</span>
+            </div>
+            <div id="mcp-status-banner" class="mcp-status-banner" style="display:none;"></div>
+            <div id="mcp-configured-list" class="mcp-configured-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <button class="save-btn" id="mcp-manager-done">Terminer</button>
     </div>
   </div>
 
@@ -275,6 +359,7 @@
 
       <div class="input-area">
         <div id="file-preview" class="file-preview-container"></div>
+        <div id="mcp-suggestions" class="mcp-suggestions-dropdown" style="display: none;"></div>
         <div id="active-command-badge" class="active-command-badge" style="display: none;"></div>
         <div class="input-wrapper">
           <button class="attach-btn" id="attach-btn" title="Joindre un fichier">
@@ -284,6 +369,14 @@
           </button>
           <textarea id="chat-input" placeholder="Comment puis-je vous aider ?" rows="1"></textarea>
           <div class="input-actions">
+            <label class="agent-mode-toggle" title="Basculer entre Mode Chat et Mode Agent">
+              <span class="mode-label chat-label">Chat</span>
+              <div class="switch">
+                <input type="checkbox" id="agent-mode-checkbox">
+                <span class="slider round"></span>
+              </div>
+              <span class="mode-label agent-label">Agent</span>
+            </label>
             <button class="voice-btn" id="stop-btn" title="Arrêter la génération" style="display: none; color: #f87171;">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>

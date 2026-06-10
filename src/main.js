@@ -9,11 +9,55 @@ const open = dialog ? dialog.open : null;
 let activeAgent = agents[0];
 let allMessages = [];
 let plugins = []; // Liste des plugins chargés
+let mcpTools = [];
+const MCP_PRESETS = [
+  {
+    id: 'filesystem',
+    name: 'Filesystem',
+    keywords: ['filesystem', 'files', 'dossier', 'directory', 'local'],
+    description: 'Accès aux fichiers locaux, lecture et navigation.',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp']
+  },
+  {
+    id: 'git',
+    name: 'Git',
+    keywords: ['git', 'repo', 'repository', 'github', 'version'],
+    description: 'Lecture des dépôts Git, branches et diffs.',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-git', '.']
+  },
+  {
+    id: 'postgres',
+    name: 'Postgres',
+    keywords: ['postgres', 'sql', 'database', 'db'],
+    description: 'Interrogation d’une base PostgreSQL.',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-postgres', 'postgresql://user:pass@localhost:5432/db']
+  },
+  {
+    id: 'github',
+    name: 'GitHub',
+    keywords: ['github', 'repo', 'issue', 'pr', 'pull request'],
+    description: 'Gestion des dépôts, issues et pull requests.',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-github']
+  },
+  {
+    id: 'slack',
+    name: 'Slack',
+    keywords: ['slack', 'chat', 'workspace', 'message'],
+    description: 'Recherche et actions dans Slack.',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-slack']
+  }
+];
 let appConfig = { 
   openai_api_key: null, 
   anthropic_api_key: null, 
   gemini_api_key: null,
   openrouter_api_key: null,
+  mcp_servers: [],
   ollama_url: 'http://localhost:11434',
   lmstudio_url: 'http://localhost:1234',
   default_provider: 'ollama',
@@ -38,6 +82,7 @@ let indexedFiles = []; // Array of { name, path, content }
 let selectedFolderPath = null;
 let favoriteAgents = []; // Array of agent IDs
 let currentUsedSources = []; // Pour l'affichage des sources RAG
+let selectedMcpServerIds = []; // Array of selected MCP server IDs
 
 
 const chatContainer = document.getElementById('chat-container');
@@ -70,10 +115,210 @@ async function loadPlugins() {
   }
 }
 
+async function loadMcpTools() {
+  try {
+    mcpTools = await invoke('list_mcp_tools');
+    console.log("Outils MCP chargés:", mcpTools);
+  } catch (err) {
+    console.error("Erreur chargement MCP:", err);
+    mcpTools = [];
+  }
+}
+
+function normalizeMcpServers() {
+  if (!Array.isArray(appConfig.mcp_servers)) appConfig.mcp_servers = [];
+  appConfig.mcp_servers = appConfig.mcp_servers.map((server, idx) => ({
+    id: server.id || `mcp-${idx + 1}`,
+    name: server.name || `MCP ${idx + 1}`,
+    transport: server.transport || 'stdio',
+    command: server.command || 'npx',
+    args: Array.isArray(server.args) ? server.args : [],
+    env: server.env && typeof server.env === 'object' ? server.env : {},
+    enabled: server.enabled !== false,
+    permissions: {
+      tools: server.permissions?.tools !== false,
+      resources: server.permissions?.resources !== false,
+      prompts: server.permissions?.prompts !== false
+    }
+  }));
+}
+
+function renderMcpSummary() {
+  const el = document.getElementById('mcp-server-summary');
+  if (!el) return;
+  const count = Array.isArray(appConfig.mcp_servers) ? appConfig.mcp_servers.length : 0;
+  const enabled = (appConfig.mcp_servers || []).filter(s => s.enabled !== false).length;
+  el.innerText = `${count} serveur(s) configuré(s), ${enabled} activé(s).`;
+}
+
+function setMcpStatus(message, kind = 'loading') {
+  const banner = document.getElementById('mcp-status-banner');
+  if (!banner) return;
+  banner.style.display = 'block';
+  banner.className = `mcp-status-banner ${kind}`;
+  banner.innerHTML = `<span class="mcp-status-text">${message}</span>`;
+}
+
+function clearMcpStatus() {
+  const banner = document.getElementById('mcp-status-banner');
+  if (!banner) return;
+  banner.style.display = 'none';
+  banner.innerHTML = '';
+}
+
+function resetMcpCustomForm() {
+  const fields = ['mcp-custom-id', 'mcp-custom-name', 'mcp-custom-transport', 'mcp-custom-command', 'mcp-custom-args', 'mcp-custom-env'];
+  const [id, name, transport, command, args, env] = fields.map(fid => document.getElementById(fid));
+  if (id) id.value = '';
+  if (name) name.value = '';
+  if (transport) transport.value = 'stdio';
+  if (command) command.value = 'npx';
+  if (args) args.value = '';
+  if (env) env.value = '';
+  const saveBtn = document.getElementById('mcp-custom-save');
+  if (saveBtn) saveBtn.innerText = 'Ajouter';
+}
+
+function fillMcpCustomForm(server) {
+  document.getElementById('mcp-custom-id').value = server.id;
+  document.getElementById('mcp-custom-name').value = server.name || '';
+  document.getElementById('mcp-custom-transport').value = server.transport || 'stdio';
+  document.getElementById('mcp-custom-command').value = server.command || 'npx';
+  document.getElementById('mcp-custom-args').value = JSON.stringify(server.args || []);
+  document.getElementById('mcp-custom-env').value = JSON.stringify(server.env || {}, null, 2);
+  document.getElementById('mcp-perm-tools').checked = server.permissions?.tools !== false;
+  document.getElementById('mcp-perm-resources').checked = server.permissions?.resources !== false;
+  document.getElementById('mcp-perm-prompts').checked = server.permissions?.prompts !== false;
+  document.getElementById('mcp-custom-save').innerText = 'Mettre à jour';
+}
+
+function renderMcpManager() {
+  const presetList = document.getElementById('mcp-preset-list');
+  const configuredList = document.getElementById('mcp-configured-list');
+  const query = (document.getElementById('mcp-search')?.value || '').toLowerCase().trim();
+  if (!presetList || !configuredList) return;
+
+  const filteredPresets = MCP_PRESETS.filter(p =>
+    !query || [p.name, p.description, ...(p.keywords || [])].some(v => v.toLowerCase().includes(query))
+  );
+
+  presetList.innerHTML = filteredPresets.map(p => `
+    <div class="mcp-item">
+      <h4>${p.name}</h4>
+      <p>${p.description}</p>
+      <button class="save-btn" data-mcp-preset="${p.id}" style="padding:8px 10px;">Ajouter</button>
+    </div>
+  `).join('') || '<div style="color: var(--text-muted); font-size: 0.8rem;">Aucun preset trouvé.</div>';
+
+  configuredList.innerHTML = (appConfig.mcp_servers || []).map(server => `
+    <div class="mcp-item">
+      <h4>${server.name}</h4>
+      <p><strong>${server.transport || 'stdio'}</strong> · ${server.command} ${Array.isArray(server.args) ? server.args.join(' ') : ''}</p>
+      <div class="mcp-permissions">
+        <label><input type="checkbox" data-mcp-permission="tools" data-mcp-id="${server.id}" ${server.permissions?.tools !== false ? 'checked' : ''} /> Tools</label>
+        <label><input type="checkbox" data-mcp-permission="resources" data-mcp-id="${server.id}" ${server.permissions?.resources !== false ? 'checked' : ''} /> Resources</label>
+        <label><input type="checkbox" data-mcp-permission="prompts" data-mcp-id="${server.id}" ${server.permissions?.prompts !== false ? 'checked' : ''} /> Prompts</label>
+      </div>
+      <label style="display:flex; align-items:center; gap:8px; font-size:0.78rem; color: var(--text-muted);">
+        <input type="checkbox" data-mcp-enabled="${server.id}" ${server.enabled !== false ? 'checked' : ''} />
+        Activé
+      </label>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="save-btn" data-mcp-edit="${server.id}" style="padding:8px 10px;">Modifier</button>
+        <button class="save-btn" data-mcp-test="${server.id}" style="padding:8px 10px;">Tester</button>
+        <button class="save-btn" data-mcp-remove="${server.id}" style="padding:8px 10px; background: rgba(239,68,68,0.2);">Supprimer</button>
+      </div>
+    </div>
+  `).join('') || '<div style="color: var(--text-muted); font-size: 0.8rem;">Aucun serveur configuré.</div>';
+}
+
+function presetToServer(preset) {
+  return {
+    id: `${preset.id}-${Date.now()}`.replace(/[^a-z0-9_-]/gi, '-').toLowerCase(),
+    name: preset.name,
+    transport: 'stdio',
+    command: preset.command,
+    args: preset.args || [],
+    env: {},
+    enabled: true,
+    permissions: { tools: true, resources: true, prompts: true }
+  };
+}
+
+async function persistMcpServers() {
+  normalizeMcpServers();
+  setMcpStatus('Sauvegarde MCP en cours...', 'loading');
+  await invoke('save_config', { config: appConfig }).catch(() => {});
+  await invoke('save_mcp_servers', { servers: appConfig.mcp_servers || [] }).catch(() => {});
+  setTimeout(() => {
+    loadMcpTools();
+  }, 0);
+  setMcpStatus('Serveurs MCP enregistrés.', 'ok');
+  setTimeout(clearMcpStatus, 2000);
+}
+
+function upsertCustomMcpServer() {
+  const id = document.getElementById('mcp-custom-id').value.trim();
+  const name = document.getElementById('mcp-custom-name').value.trim();
+  const transport = document.getElementById('mcp-custom-transport').value;
+  const command = document.getElementById('mcp-custom-command').value.trim();
+  const argsRaw = document.getElementById('mcp-custom-args').value.trim() || '[]';
+  const envRaw = document.getElementById('mcp-custom-env').value.trim() || '{}';
+  const permissions = {
+    tools: document.getElementById('mcp-perm-tools')?.checked !== false,
+    resources: document.getElementById('mcp-perm-resources')?.checked !== false,
+    prompts: document.getElementById('mcp-perm-prompts')?.checked !== false
+  };
+
+  if (!name || !command) {
+    alert('Nom et commande sont obligatoires.');
+    return;
+  }
+
+  let args;
+  let env;
+  try {
+    args = JSON.parse(argsRaw);
+    if (!Array.isArray(args)) throw new Error('args');
+  } catch {
+    alert('Le champ Args doit être un JSON valide de tableau.');
+    return;
+  }
+  try {
+    env = JSON.parse(envRaw);
+    if (!env || typeof env !== 'object' || Array.isArray(env)) throw new Error('env');
+  } catch {
+    alert('Le champ Env doit être un JSON valide d’objet.');
+    return;
+  }
+
+  normalizeMcpServers();
+  const server = {
+    id: id || `${name}-${Date.now()}`.replace(/[^a-z0-9_-]/gi, '-').toLowerCase(),
+    name,
+    transport,
+    command,
+    args,
+    env,
+    enabled: true,
+    permissions
+  };
+
+  const index = appConfig.mcp_servers.findIndex(s => s.id === server.id);
+  if (index >= 0) appConfig.mcp_servers[index] = server;
+  else appConfig.mcp_servers.push(server);
+
+  renderMcpManager();
+  renderMcpSummary();
+  persistMcpServers();
+  resetMcpCustomForm();
+}
+
 // Fonction pour exécuter un outil détecté dans le texte
 async function handleToolCalls(text) {
   // Format attendu : [[tool:plugin_id/tool_name?{"arg":"val"}]]
-  const toolRegex = /\[\[tool:([a-z0-9_-]+)\/([a-z0-9_-]+)\?({.*})\]\]/g;
+  // Permet les espaces/sauts de ligne dans le JSON
+  const toolRegex = /\[\[tool:([a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)\?([\s\S]*?)\]\]/g;
   let match;
   let newText = text;
   let hasCalls = false;
@@ -85,7 +330,9 @@ async function handleToolCalls(text) {
       const args = JSON.parse(argsStr);
       console.log(`Exécution de l'outil: ${pluginId}/${toolName}`, args);
       
-      const result = await invoke('run_plugin_tool', { plugin_id: pluginId, tool_name: toolName, args });
+      const result = pluginId.startsWith('mcp__')
+        ? await invoke('run_mcp_tool', { server_id: pluginId.replace('mcp__', ''), tool_name: toolName, args })
+        : await invoke('run_plugin_tool', { plugin_id: pluginId, tool_name: toolName, args });
       const resultStr = JSON.stringify(result);
       
       // Remplacer l'appel par le résultat dans le prompt suivant ou l'afficher
@@ -101,38 +348,40 @@ async function handleToolCalls(text) {
 async function init() {
   renderAgents();
   setupEventListeners();
-  await loadPlugins();
 
-  // Charger la config et l'historique en parallèle
-  const [loadedConfig, loadedHistory] = await Promise.all([
-    invoke('load_config').catch(() => ({})),
-    invoke('load_history').catch(() => [])
-  ]);
-  
-  console.log("Configuration chargée:", loadedConfig);
-  console.log("Historique chargé:", loadedHistory.length, "messages");
-  
-  // Fusionner pour garder les valeurs par défaut (ex: preferred_models initiaux)
-  appConfig = { 
-      ...appConfig, 
-      ...loadedConfig,
-      // S'assurer que les preferred_models sont fusionnés s'ils existent partiellement
-      preferred_models: { ...appConfig.preferred_models, ...(loadedConfig.preferred_models || {}) }
+  // Charger d'abord la configuration légère, puis laisser le temps au rendu de s'afficher.
+  const loadedConfig = await invoke('load_config').catch(() => ({}));
+  appConfig = {
+    ...appConfig,
+    ...loadedConfig,
+    preferred_models: { ...appConfig.preferred_models, ...(loadedConfig.preferred_models || {}) }
   };
-  
-  allMessages = loadedHistory;
+  normalizeMcpServers();
   favoriteAgents = appConfig.favorites || [];
 
-  // Vérifier si Ollama est disponible
-  ollamaAvailable = await invoke('check_ollama').catch(() => false);
   updateSystemStatus();
   applyTypography();
-  
   if (appConfig.font_family) document.getElementById('settings-font-family').value = appConfig.font_family;
   if (appConfig.font_size) document.getElementById('settings-font-size').value = appConfig.font_size;
-
   selectAgent(agents[0].id, false);
   await startListeners();
+
+  // Lancer le reste après le premier paint.
+  requestAnimationFrame(() => {
+    setTimeout(async () => {
+      const loadedHistory = await invoke('load_history').catch(() => []);
+      console.log("Historique chargé:", loadedHistory.length, "messages");
+      allMessages = loadedHistory;
+      renderChatHistoryIncremental();
+
+      ollamaAvailable = await invoke('check_ollama').catch(() => false);
+      updateSystemStatus();
+
+      Promise.allSettled([loadPlugins(), loadMcpTools()]).then(() => {
+        renderMcpSummary();
+      });
+    }, 0);
+  });
 }
 
 async function handleReActLoop(rawText, msgEl) {
@@ -167,16 +416,272 @@ async function handleReActLoop(rawText, msgEl) {
 }
 
 function getToolsPrompt() {
-  if (plugins.length === 0) return "";
-  let p = "\n\n[SYSTÈME D'OUTILS DISPONIBLES]\n";
-  p += "Tu peux utiliser des outils en insérant ce tag exact dans ta réponse (remplace les paramètres) :\n";
-  plugins.forEach(plugin => {
-    plugin.tools.forEach(tool => {
-      p += `- [[tool:${plugin.id}/${tool.name}?${JSON.stringify(tool.parameters.properties)}]] : ${tool.description}\n`;
+  const agentModeCheckbox = document.getElementById('agent-mode-checkbox');
+  const isAgentMode = agentModeCheckbox ? agentModeCheckbox.checked : true;
+  
+  if (!isAgentMode) {
+    return "\n[MODE CHAT SEULEMENT]\nTu es en mode conversationnel strict. Tu NE DOIS PAS utiliser d'outils, exécuter des commandes ou chercher à agir comme un agent exécutif. Réponds simplement à l'utilisateur de manière naturelle et textuelle. Les outils sont DÉSACTIVÉS.\n";
+  }
+
+  let p = "";
+  let hasTools = false;
+
+  if (plugins && plugins.length > 0) {
+    p += "\n\n[SYSTÈME D'OUTILS DISPONIBLES]\n";
+    p += "Tu es un AGENT actif. Tu peux utiliser des outils en insérant ce tag dans ta réponse. Remplace la partie JSON par les arguments réels :\n";
+    plugins.forEach(plugin => {
+      if (plugin.tools) {
+        plugin.tools.forEach(tool => {
+          p += `- [[tool:${plugin.id}/${tool.name}?{"param":"valeur"}]] : ${tool.description} (Schéma attendu: ${JSON.stringify(tool.parameters.properties)})\n`;
+          hasTools = true;
+        });
+      }
     });
-  });
-  p += "\nImportant : Si tu utilises un outil, arrête ton message immédiatement après le tag. Le résultat te sera fourni.\n";
+  }
+
+  // Filter MCP tools by selected servers
+  let mcpToolsToExpose = mcpTools || [];
+  if (selectedMcpServerIds.length > 0) {
+    mcpToolsToExpose = mcpToolsToExpose.filter(tool =>
+      selectedMcpServerIds.includes(tool.server_id)
+    );
+  }
+
+  const fsServer = findFilesystemServer();
+  const fsSelected = fsServer && selectedMcpServerIds.includes(fsServer.id);
+
+  if (mcpToolsToExpose.length > 0) {
+    p += "\n[OUTILS MCP DISPONIBLES]\n";
+    p += "IMPORTANT : Tu es un AGENT EXÉCUTIF, pas un simple chatbot. Tu DOIS utiliser ces outils pour répondre aux demandes en insérant le tag avec tes arguments JSON.\n";
+    p += "Format EXACT attendu: [[tool:mcp__serveur/outil?{\"argument\":\"valeur\"}]]\n";
+    mcpToolsToExpose.forEach(tool => {
+      p += `- [[tool:mcp__${tool.server_id}/${tool.name}?{...}]] : ${tool.description || ''} (Schéma JSON des arguments: ${JSON.stringify(tool.input_schema?.properties || {})})\n`;
+      hasTools = true;
+    });
+  }
+
+  if (fsSelected) {
+    p += `\n[RÈGLE ABSOLUE FILESYSTEM]\nLe serveur MCP Filesystem est ACTIF. Tu as accès complet aux fichiers locaux. INTERDICTION de répondre "Je ne peux pas accéder aux fichiers". Utilise IMMÉDIATEMENT [[tool:mcp__${fsServer.id}/list_directory?{"path":"..."}]] pour explorer, ou [[tool:mcp__${fsServer.id}/read_file?{"path":"..."}]] pour lire.\n`;
+    hasTools = true;
+  }
+
+  if (hasTools) {
+    p += "\nRègle d'exécution : Dès que tu as besoin d'une info, insère UNIQUEMENT le tag [[tool:...]] avec un JSON valide et ARRÊTE-TOI. Le système l'exécutera et te donnera le résultat pour continuer.\n";
+  }
+
   return p;
+}
+
+function findFilesystemServer() {
+  return (appConfig.mcp_servers || []).find(server => {
+    const name = (server.name || '').toLowerCase();
+    const id = (server.id || '').toLowerCase();
+    const args = Array.isArray(server.args) ? server.args.join(' ').toLowerCase() : '';
+    return (name.includes('filesystem') || id.includes('filesystem') || args.includes('@modelcontextprotocol/server-filesystem')) && server.enabled !== false;
+  });
+}
+
+function getActiveMcpServers() {
+  return (appConfig.mcp_servers || []).filter(server => server.enabled !== false);
+}
+
+function findMcpServerByNameOrId(query) {
+  const q = (query || '').toLowerCase().trim();
+  if (!q) return null;
+  return getActiveMcpServers().find(server => {
+    const name = (server.name || '').toLowerCase();
+    const id = (server.id || '').toLowerCase();
+    return name === q || id === q || name.includes(q) || id.includes(q);
+  }) || null;
+}
+
+function updateCommandBadge() {
+  const badge = document.getElementById('active-command-badge');
+  if (!badge) return;
+
+  const val = chatInput.value;
+  if (val.startsWith('/') && val.includes(' ')) {
+    const cmd = val.split(' ')[0].toLowerCase();
+    const agentCmd = activeAgent.commands?.find(c => c.cmd === cmd);
+    
+    if (agentCmd) {
+      badge.innerHTML = `<span>✨ Action active :</span> ${agentCmd.desc}`;
+      badge.style.display = 'flex';
+      return;
+    } else if (activeAgent.id === 'translator' && cmd.length === 3) {
+      badge.innerHTML = `<span>🌍 Traduction :</span> ${cmd.substring(1).toUpperCase()}`;
+      badge.style.display = 'flex';
+      return;
+    }
+  }
+
+  // If no magic command is active, show selected MCPs
+  if (selectedMcpServerIds.length > 0) {
+    const names = selectedMcpServerIds
+      .map(id => (appConfig.mcp_servers || []).find(s => s.id === id)?.name || id)
+      .filter(Boolean);
+    if (names.length > 0) {
+      badge.innerHTML = `<span>🔌 MCP :</span> ${names.join(', ')} <span style="cursor:pointer;opacity:0.5;" onclick="window.clearAllMcpServers()">✕</span>`;
+      badge.style.display = 'flex';
+      return;
+    }
+  }
+
+  badge.style.display = 'none';
+}
+
+window.clearAllMcpServers = function() {
+  selectedMcpServerIds = [];
+  updateCommandBadge();
+};
+
+function handleMcpSuggestions() {
+  const suggestionsEl = document.getElementById('mcp-suggestions');
+  if (!suggestionsEl) return;
+
+  const val = chatInput.value;
+  const match = val.match(/\/mcp\s*([^\s]*)$/i);
+  
+  if (match) {
+    const query = match[1].toLowerCase();
+    const activeServers = getActiveMcpServers();
+    const filtered = activeServers.filter(s => 
+      !query || s.name.toLowerCase().includes(query) || s.id.toLowerCase().includes(query)
+    );
+
+    // Always offer "clear all" option at bottom if some are selected
+    const clearItem = selectedMcpServerIds.length > 0 ?
+      [{ id: '__clear__', name: '✕ Désactiver tous les MCP', command: '', enabled: true }] : [];
+
+    const allItems = [...filtered, ...clearItem];
+
+    if (allItems.length > 0) {
+      suggestionsEl.innerHTML = allItems.map((s, index) => {
+        const isActive = selectedMcpServerIds.includes(s.id);
+        const checkIcon = s.id === '__clear__' ? '' : (isActive ? '✅ ' : '⬜ ');
+        return `
+          <div class="mcp-suggestion-item ${isActive ? 'active' : ''}" data-index="${index}" data-id="${s.id}" data-name="${s.name}">
+            <span>${checkIcon}${s.name}</span>
+            <span class="mcp-desc">${s.id === '__clear__' ? 'Désélectionne tous les serveurs' : (s.command || s.id)}</span>
+          </div>
+        `;
+      }).join('');
+      suggestionsEl.style.display = 'flex';
+
+      // Click handler — toggle selection, keep dropdown open for multi-select
+      suggestionsEl.querySelectorAll('.mcp-suggestion-item').forEach(item => {
+        item.addEventListener('mousedown', (e) => {
+          e.preventDefault(); // prevent blur
+          const id = item.dataset.id;
+          
+          if (id === '__clear__') {
+            selectedMcpServerIds = [];
+            chatInput.value = val.replace(/\/mcp\s*[^\s]*$/i, '').trim();
+            suggestionsEl.style.display = 'none';
+          } else {
+            const idx = selectedMcpServerIds.indexOf(id);
+            if (idx >= 0) {
+              selectedMcpServerIds.splice(idx, 1);
+            } else {
+              selectedMcpServerIds.push(id);
+            }
+            // Re-render to show updated checkboxes
+            handleMcpSuggestions();
+          }
+          
+          chatInput.focus();
+          updateCommandBadge();
+        });
+      });
+      return;
+    }
+  }
+
+  suggestionsEl.style.display = 'none';
+}
+
+function setSelectedMcpServer(server) {
+  if (!server) {
+    selectedMcpServerIds = [];
+  } else if (!selectedMcpServerIds.includes(server.id)) {
+    selectedMcpServerIds.push(server.id);
+  }
+  updateCommandBadge();
+}
+
+function wantsLocalFilesystem(text) {
+  const t = (text || '').toLowerCase();
+  return [
+    'dossier', 'folder', 'fichier', 'files', 'filesystem', 'bureau',
+    'downloads', 'téléchargements', 'telechargements', 'workspace',
+    'documents', 'projet', 'project', 'répertoire', 'repertoire', 'dir'
+  ].some(k => t.includes(k));
+}
+
+function mcpServerWantsLocalFiles(server, text) {
+  const combined = `${server.name || ''} ${server.id || ''}`.toLowerCase();
+  return combined.includes('filesystem') || wantsLocalFilesystem(text);
+}
+
+async function buildFilesystemContext(text, force = false) {
+  const server = findFilesystemServer();
+  if (!server || (!force && !wantsLocalFilesystem(text))) return '';
+
+  let targetPath = selectedFolderPath || '';
+  if (!targetPath) {
+    targetPath = await invoke('get_desktop_dir').catch(() => '');
+  }
+  if (!targetPath) targetPath = '.';
+  try {
+    const listing = await invoke('run_mcp_tool', {
+      server_id: server.id,
+      tool_name: 'list_directory',
+      args: { path: targetPath === '.' ? '' : '' }
+    });
+    const entries = listing?.entries || listing?.result?.entries || [];
+    const preview = entries.slice(0, 20).map(entry => {
+      const type = entry.type || 'file';
+      const size = entry.size != null ? ` (${entry.size} bytes)` : '';
+      return `- ${entry.name}${type === 'directory' ? '/' : ''}${size}`;
+    }).join('\n');
+
+    let block = `\n\n[CONTEXT MCP FILESYSTEM]\nRacine utilisée: ${targetPath}\nContenu du dossier:\n${preview || '(vide)'}\n`;
+
+    const fileMatch = text.match(/(?:fichier|file)\s+([^\s,.;]+)/i);
+    if (fileMatch && fileMatch[1]) {
+      const filePath = fileMatch[1];
+      const fileContent = await invoke('run_mcp_tool', {
+        server_id: server.id,
+        tool_name: 'read_file',
+        args: { path: filePath }
+      }).catch(() => null);
+      const content = fileContent?.content || fileContent?.result?.content;
+      if (content) {
+        block += `\nContenu de ${filePath}:\n${content.substring(0, 6000)}\n`;
+      }
+    }
+    return block + '\n';
+  } catch (err) {
+    console.warn('Filesystem MCP auto-context failed:', err);
+    return `\n\n[CONTEXT MCP FILESYSTEM]\nErreur de lecture automatique: ${err}\n`;
+  }
+}
+
+async function buildSelectedMcpContext(text) {
+  if (selectedMcpServerIds.length === 0) return '';
+  let combined = '';
+
+  for (const sid of selectedMcpServerIds) {
+    const server = (appConfig.mcp_servers || []).find(s => s.id === sid && s.enabled !== false);
+    if (!server) continue;
+
+    if (mcpServerWantsLocalFiles(server, text)) {
+      combined += await buildFilesystemContext(text, true);
+    } else {
+      combined += `\n\n[CONTEXT MCP: ${server.name}]\nServeur actif: ${server.name} (${server.id}).\nL'utilisateur a sélectionné ce serveur avec /mcp. Utilise ses outils pour répondre.\n`;
+    }
+  }
+  return combined;
 }
 
 async function startListeners() {
@@ -387,6 +892,32 @@ function renderChatHistory() {
   });
 }
 
+function renderChatHistoryIncremental() {
+  chatContainer.innerHTML = '';
+  const msgs = allMessages.filter(m => m.agent_id === activeAgent.id);
+  if (msgs.length === 0) {
+    renderChatHistory();
+    return;
+  }
+
+  const chunkSize = 20;
+  let index = 0;
+  const renderChunk = () => {
+    const slice = msgs.slice(index, index + chunkSize);
+    slice.forEach(m => {
+      const el = addMessage(m.role, m.content, m.images, false, m.cmd_used);
+      if (m.sources && m.sources.length > 0) {
+        renderSourcesBadge(el.closest('.message-wrapper'), m.sources);
+      }
+    });
+    index += chunkSize;
+    if (index < msgs.length) {
+      setTimeout(renderChunk, 0);
+    }
+  };
+  renderChunk();
+}
+
 function renderSourcesBadge(wrapper, sources) {
   const sourcesContainer = document.createElement('div');
   sourcesContainer.className = 'sources-container';
@@ -560,6 +1091,22 @@ function showContextualHelp() {
   html += `<li><code>/clear</code> : Effacer l'historique</li>`;
   html += `<li><code>/help</code> : Voir cette aide</li>`;
   html += `</ul>`;
+
+  // Section MCP dynamique dans l'aide de l'agent
+  const activeServers = getActiveMcpServers();
+  html += `<h4 style="margin-top: 15px; display: flex; align-items: center; gap: 5px;">🔌 Serveurs MCP Actifs</h4>`;
+  if (activeServers.length > 0) {
+    html += `<ul class="feature-list">`;
+    activeServers.forEach(s => {
+      const isSelected = selectedMcpServerIds.includes(s.id);
+      const statusText = isSelected ? ' <span style="color: var(--accent-neon); font-size: 0.75rem;">🟢 actif</span>' : '';
+      html += `<li><code>/mcp ${s.name}</code> : Utiliser ${s.name}${statusText}</li>`;
+    });
+    html += `<li><code>/mcp clear</code> : Désactiver les serveurs MCP</li>`;
+    html += `</ul>`;
+  } else {
+    html += `<p style="font-size: 0.75rem; opacity: 0.6; margin-left: 10px; font-style: italic;">Aucun serveur MCP actif. Activez-en dans les paramètres ⚙️.</p>`;
+  }
   
   dynamicSection.innerHTML = html;
   helpPanel.classList.add('open');
@@ -653,6 +1200,47 @@ async function sendMessage(isAutoResponse = false) {
   let displayContent = null;
   let cmd_used = null;
 
+  // --- Parser MCP anywhere in the input ---
+  if (!isAutoResponse) {
+    const mcpMatch = text.match(/\/mcp\s+([^\s]+)/i);
+    if (mcpMatch) {
+      const serverParam = mcpMatch[1];
+      // remove /mcp <server> from text
+      text = text.replace(mcpMatch[0], '').trim();
+      
+      if (serverParam.toLowerCase() === 'clear' || serverParam.toLowerCase() === 'none') {
+        setSelectedMcpServer(null);
+        if (!text) {
+          addMessage('ai', 'MCP désactivé pour la conversation actuelle.');
+          chatInput.value = '';
+          return;
+        }
+      } else {
+        const server = findMcpServerByNameOrId(serverParam);
+        if (server) {
+          setSelectedMcpServer(server);
+          if (!text) {
+            addMessage('ai', `Serveur MCP sélectionné : ${server.name}`);
+            chatInput.value = '';
+            return;
+          }
+        } else {
+          if (!text) {
+            addMessage('ai', `Serveur MCP introuvable : ${serverParam}`);
+            chatInput.value = '';
+            return;
+          }
+        }
+      }
+    } else if (text.trim().toLowerCase() === '/mcp') {
+      const activeServers = getActiveMcpServers();
+      const list = activeServers.map(s => `- ${s.name} (${s.id})`).join('\n') || '(aucun MCP actif)';
+      addMessage('ai', `MCP actifs:\n${list}\n\nUtilise /mcp <nom> pour sélectionner un serveur.`);
+      chatInput.value = '';
+      return;
+    }
+  }
+
   // --- Système de Slash Commands ---
   if (!isAutoResponse && text.startsWith('/')) {
     const parts = text.split(' ');
@@ -690,9 +1278,8 @@ async function sendMessage(isAutoResponse = false) {
     }
   }
 
-  // Masquer le badge après envoi
-  const badgeEl = document.getElementById('active-command-badge');
-  if (badgeEl) badgeEl.style.display = 'none';
+  // Mettre à jour le badge après envoi
+  updateCommandBadge();
 
   // Activer l'indicateur de chargement (US-07)
   if (topLoadingBar) {
@@ -752,7 +1339,27 @@ async function sendMessage(isAutoResponse = false) {
       return `[${role}]: ${m.content}`;
     }).join('\n\n');
 
+    let filesystemContext = '';
+    let selectedMcpContext = '';
+    if (selectedMcpServerIds.length > 0) {
+      selectedMcpContext = await buildSelectedMcpContext(text);
+      if (selectedMcpContext) {
+        setMcpStatus(`MCP actifs: ${selectedMcpServerIds.length}`, 'ok');
+      }
+    }
+    if (wantsLocalFilesystem(text) && findFilesystemServer()) {
+      setMcpStatus('Lecture locale via MCP Filesystem...', 'loading');
+      filesystemContext = await buildFilesystemContext(text);
+      clearMcpStatus();
+    }
+
     let fullPrompt = `INSTRUCTIONS SYSTÈME :\n${activeAgent.systemPrompt}\n${getToolsPrompt()}\n\n`;
+    if (selectedMcpContext) {
+      fullPrompt += `${selectedMcpContext}`;
+    }
+    if (filesystemContext) {
+      fullPrompt += `${filesystemContext}`;
+    }
 
     // Injection intelligente de la Base de Connaissance (RAG)
     if (indexedFiles.length > 0) {
@@ -800,8 +1407,8 @@ async function sendMessage(isAutoResponse = false) {
           images: imagesToSend
         });
       } catch (err) {
-        handleError(err, 'ollama', { fullPrompt, fullPromptToSend, imagesToSend });
-      }
+      handleError(err, 'ollama', { fullPrompt, fullPromptToSend, imagesToSend });
+    }
     } else if (provider === 'lmstudio') {
       try {
         // Fallback intelligent pour LM Studio
@@ -818,8 +1425,8 @@ async function sendMessage(isAutoResponse = false) {
           prompt: `${fullPrompt}${fullPromptToSend}`
         });
       } catch (err) {
-        handleError(err, 'lmstudio', { fullPrompt, fullPromptToSend });
-      }
+      handleError(err, 'lmstudio', { fullPrompt, fullPromptToSend });
+    }
     } else if (provider !== 'none') {
       try {
         await callCloudStream(provider, activeAgent.systemPrompt, fullPromptToSend, imagesToSend);
@@ -1173,32 +1780,26 @@ function setupEventListeners() {
 
   sendBtn.addEventListener('click', sendMessage);
   chatInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+    if (e.key === 'Enter' && !e.shiftKey) { 
+      // If suggestions dropdown is visible, check if we want to intercept, else send message.
+      const suggestionsEl = document.getElementById('mcp-suggestions');
+      if (suggestionsEl && suggestionsEl.style.display === 'flex') {
+        // If they press Enter while suggestions are open, we can just hide it or do nothing, or we send. Let's just send.
+        suggestionsEl.style.display = 'none';
+      }
+      e.preventDefault(); 
+      sendMessage(); 
+    }
+    if (e.key === 'Escape') {
+      const suggestionsEl = document.getElementById('mcp-suggestions');
+      if (suggestionsEl) suggestionsEl.style.display = 'none';
+    }
   });
   chatInput.addEventListener('input', () => {
     chatInput.style.height = 'auto';
     chatInput.style.height = (chatInput.scrollHeight) + 'px';
-
-    // Détection de commande magique
-    const val = chatInput.value;
-    const badge = document.getElementById('active-command-badge');
-    
-    if (val.startsWith('/') && val.includes(' ')) {
-      const cmd = val.split(' ')[0].toLowerCase();
-      const agentCmd = activeAgent.commands?.find(c => c.cmd === cmd);
-      
-      if (agentCmd) {
-        badge.innerHTML = `<span>✨ Action active :</span> ${agentCmd.desc}`;
-        badge.style.display = 'flex';
-      } else if (activeAgent.id === 'translator' && cmd.length === 3) {
-        badge.innerHTML = `<span>🌍 Traduction :</span> ${cmd.substring(1).toUpperCase()}`;
-        badge.style.display = 'flex';
-      } else {
-        badge.style.display = 'none';
-      }
-    } else {
-      badge.style.display = 'none';
-    }
+    updateCommandBadge();
+    handleMcpSuggestions();
   });
 
   document.getElementById('clear-btn').addEventListener('click', async () => {
@@ -1214,6 +1815,10 @@ function setupEventListeners() {
     if (!e.target.closest('.export-dropdown')) {
       document.getElementById('export-menu')?.classList.remove('open');
     }
+    if (!e.target.closest('.input-area')) {
+      const suggestionsEl = document.getElementById('mcp-suggestions');
+      if (suggestionsEl) suggestionsEl.style.display = 'none';
+    }
   });
 
   document.getElementById('settings-btn').addEventListener('click', () => {
@@ -1223,11 +1828,103 @@ function setupEventListeners() {
     document.getElementById('settings-gemini-key').value = appConfig.gemini_api_key || '';
     document.getElementById('settings-openrouter-key').value = appConfig.openrouter_api_key || '';
     document.getElementById('settings-anthropic-key').value = appConfig.anthropic_api_key || '';
+    renderMcpSummary();
     
     updateSettingsVisibility();
     updateModelSelect();
     // Remplir les selects de raccourcis
     populateShortcutSelects();
+    renderMcpSummary();
+  });
+
+  const mcpManagerPanel = document.getElementById('mcp-manager-panel');
+  document.getElementById('open-mcp-manager').addEventListener('click', () => {
+    normalizeMcpServers();
+    renderMcpManager();
+    resetMcpCustomForm();
+    clearMcpStatus();
+    mcpManagerPanel.classList.add('open');
+  });
+  document.getElementById('open-mcp-import').addEventListener('click', () => {
+    normalizeMcpServers();
+    renderMcpManager();
+    resetMcpCustomForm();
+    clearMcpStatus();
+    mcpManagerPanel.classList.add('open');
+    document.getElementById('mcp-search').focus();
+  });
+  document.getElementById('mcp-manager-close').addEventListener('click', () => {
+    mcpManagerPanel.classList.remove('open');
+  });
+  document.getElementById('mcp-manager-done').addEventListener('click', () => {
+    mcpManagerPanel.classList.remove('open');
+  });
+  document.getElementById('mcp-search').addEventListener('input', renderMcpManager);
+  document.getElementById('mcp-custom-save').addEventListener('click', upsertCustomMcpServer);
+  document.getElementById('mcp-custom-reset').addEventListener('click', resetMcpCustomForm);
+  document.getElementById('mcp-preset-list').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-mcp-preset]');
+    if (!btn) return;
+    const preset = MCP_PRESETS.find(p => p.id === btn.dataset.mcpPreset);
+    if (!preset) return;
+    appConfig.mcp_servers = appConfig.mcp_servers || [];
+    appConfig.mcp_servers.push(presetToServer(preset));
+    renderMcpManager();
+    renderMcpSummary();
+    persistMcpServers();
+  });
+  document.getElementById('mcp-configured-list').addEventListener('click', (e) => {
+    const removeBtn = e.target.closest('[data-mcp-remove]');
+    const editBtn = e.target.closest('[data-mcp-edit]');
+    const testBtn = e.target.closest('[data-mcp-test]');
+    const enabledToggle = e.target.closest('[data-mcp-enabled]');
+    const permToggle = e.target.closest('[data-mcp-permission]');
+    if (removeBtn) {
+      const id = removeBtn.dataset.mcpRemove;
+      appConfig.mcp_servers = (appConfig.mcp_servers || []).filter(s => s.id !== id);
+      renderMcpManager();
+      renderMcpSummary();
+      persistMcpServers();
+    } else if (editBtn) {
+      const id = editBtn.dataset.mcpEdit;
+      const server = (appConfig.mcp_servers || []).find(s => s.id === id);
+      if (!server) return;
+      fillMcpCustomForm(server);
+    } else if (testBtn) {
+      const id = testBtn.dataset.mcpTest;
+      testBtn.disabled = true;
+      testBtn.innerText = '...';
+      const server = (appConfig.mcp_servers || []).find(s => s.id === id);
+      const details = server ? `${server.command} ${(server.args || []).join(' ')}` : id;
+      setMcpStatus(`Test en cours pour ${server?.name || id} : ${details}`, 'loading');
+  if (server?.command) {
+    console.log('MCP test command:', server.command, server.args || []);
+  }
+      invoke('test_mcp_server', { serverId: id })
+        .then((result) => {
+          setMcpStatus(`OK: ${result.server_name} - ${result.tools_count} outil(s) détecté(s)${result.mode ? ` (${result.mode})` : ''}.`, 'ok');
+        })
+        .catch((err) => {
+          setMcpStatus(`Test échoué: ${err}`, 'error');
+        })
+        .finally(() => {
+          testBtn.disabled = false;
+          testBtn.innerText = 'Tester';
+          setTimeout(clearMcpStatus, 4000);
+        });
+    } else if (enabledToggle) {
+      const id = enabledToggle.dataset.mcpEnabled;
+      const server = (appConfig.mcp_servers || []).find(s => s.id === id);
+      if (server) server.enabled = enabledToggle.checked;
+      persistMcpServers();
+    } else if (permToggle) {
+      const id = permToggle.dataset.mcpId;
+      const server = (appConfig.mcp_servers || []).find(s => s.id === id);
+      if (!server) return;
+      if (!server.permissions) server.permissions = { tools: true, resources: true, prompts: true };
+      server.permissions[permToggle.dataset.mcpPermission] = permToggle.checked;
+      persistMcpServers();
+    }
   });
 
   // --- Galerie ---
@@ -1434,6 +2131,7 @@ function setupEventListeners() {
 
     appConfig.font_family = document.getElementById('settings-font-family').value;
     appConfig.font_size = document.getElementById('settings-font-size').value;
+    normalizeMcpServers();
     
     appConfig.custom_shortcuts = {
       '1': document.getElementById('shortcut-1').value,
@@ -1443,6 +2141,10 @@ function setupEventListeners() {
 
     applyTypography();
     await invoke('save_config', { config: appConfig });
+    await invoke('save_mcp_servers', { servers: appConfig.mcp_servers || [] }).catch(() => {});
+    setTimeout(() => {
+      loadMcpTools();
+    }, 0);
     
     settingsPanel.classList.remove('open');
     ollamaAvailable = await invoke('check_ollama').catch(() => false);
