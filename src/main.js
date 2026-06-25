@@ -746,8 +746,46 @@ async function startListeners() {
       document.getElementById('stop-btn').style.display = 'none';
       document.getElementById('send-btn').style.display = 'flex';
       
-    const rawText = currentMessageEl.dataset.raw;
+      const rawText = currentMessageEl.dataset.raw;
       const msgEl = currentMessageEl;
+      const wrapper = msgEl.closest('.message-wrapper');
+      
+      if (wrapper) {
+        const actionsEl = document.createElement('div');
+        actionsEl.className = 'message-actions';
+        
+        const deleteBtn = document.createElement('button');
+        deleteBtn.innerHTML = '✕';
+        deleteBtn.title = 'Supprimer';
+        deleteBtn.onclick = () => deleteMessage('ai', rawText);
+        
+        const copyBtn = document.createElement('button');
+        copyBtn.innerHTML = '📋';
+        copyBtn.title = 'Copier';
+        copyBtn.onclick = () => {
+          navigator.clipboard.writeText(rawText);
+          copyBtn.innerText = '✅';
+          setTimeout(() => copyBtn.innerText = '📋', 2000);
+        };
+
+        const exportMsgBtn = document.createElement('button');
+        exportMsgBtn.innerHTML = '📥';
+        exportMsgBtn.title = 'Exporter cette réponse';
+        exportMsgBtn.onclick = () => {
+          const blob = new Blob([rawText], { type: 'text/plain' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `response_${Date.now()}.txt`;
+          a.click();
+          URL.revokeObjectURL(url);
+        };
+
+        actionsEl.appendChild(copyBtn);
+        actionsEl.appendChild(exportMsgBtn);
+        actionsEl.appendChild(deleteBtn);
+        wrapper.appendChild(actionsEl);
+      }
       
       // On sauvegarde ici avant de vider currentMessageEl pour US-01
       allMessages.push({ 
@@ -1278,9 +1316,6 @@ async function sendMessage(isAutoResponse = false) {
     }
   }
 
-  // Mettre à jour le badge après envoi
-  updateCommandBadge();
-
   // Activer l'indicateur de chargement (US-07)
   if (topLoadingBar) {
     topLoadingBar.style.width = '30%';
@@ -1295,6 +1330,7 @@ async function sendMessage(isAutoResponse = false) {
     }
     generateArtistImage(text);
     chatInput.value = '';
+    updateCommandBadge();
     return;
   }
 
@@ -1302,6 +1338,7 @@ async function sendMessage(isAutoResponse = false) {
   const userVisibleText = displayContent || text;
 
   chatInput.value = '';
+  updateCommandBadge();
   chatInput.style.height = 'auto';
   document.getElementById('send-btn').style.display = 'none';
   document.getElementById('stop-btn').style.display = 'flex';
@@ -1313,10 +1350,15 @@ async function sendMessage(isAutoResponse = false) {
   // Générer un ID de requête unique
   currentRequestId = Math.random().toString(36).substring(2, 15);
 
+  const msgWrapper = document.createElement('div');
+  msgWrapper.className = 'message-wrapper ai';
+
   currentMessageEl = document.createElement('div');
   currentMessageEl.className = 'typing-indicator';
   currentMessageEl.innerHTML = '<span></span><span></span><span></span>';
-  chatContainer.appendChild(currentMessageEl);
+  
+  msgWrapper.appendChild(currentMessageEl);
+  chatContainer.appendChild(msgWrapper);
   chatContainer.scrollTop = chatContainer.scrollHeight;
 
   const provider = getProvider();
