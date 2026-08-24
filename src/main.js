@@ -15,9 +15,9 @@ const MCP_PRESETS = [
     id: 'filesystem',
     name: 'Filesystem',
     keywords: ['filesystem', 'files', 'dossier', 'directory', 'local'],
-    description: 'Accès aux fichiers locaux, lecture et navigation.',
+    description: 'Gestion complète des fichiers locaux : lire, écrire, créer, déplacer, supprimer, rechercher.',
     command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp']
+    args: ['-y', '@modelcontextprotocol/server-filesystem', '~']
   },
   {
     id: 'git',
@@ -83,6 +83,8 @@ let selectedFolderPath = null;
 let favoriteAgents = []; // Array of agent IDs
 let currentUsedSources = []; // Pour l'affichage des sources RAG
 let selectedMcpServerIds = []; // Array of selected MCP server IDs
+let currentConversationId = null; // ID de la conversation active (null = brouillon non sauvegardé)
+let conversations = []; // Liste des métadonnées de conversations
 
 
 const chatContainer = document.getElementById('chat-container');
@@ -149,6 +151,81 @@ function renderMcpSummary() {
   const count = Array.isArray(appConfig.mcp_servers) ? appConfig.mcp_servers.length : 0;
   const enabled = (appConfig.mcp_servers || []).filter(s => s.enabled !== false).length;
   el.innerText = `${count} serveur(s) configuré(s), ${enabled} activé(s).`;
+  renderMcpStatusBar();
+}
+
+// ─── Barre de statut sidebar + dropdown MCP ─────────────────────────
+
+function renderMcpStatusBar() {
+  const countEl = document.getElementById('mcp-count');
+  if (!countEl) return;
+  const servers = appConfig.mcp_servers || [];
+  const enabled = servers.filter(s => s.enabled !== false).length;
+  countEl.textContent = `${enabled}/${servers.length} MCP`;
+
+  const listEl = document.getElementById('mcp-status-list');
+  if (!listEl) return;
+  listEl.innerHTML = '';
+  if (!servers.length) {
+    listEl.innerHTML = '<div class="mcp-status-empty">Aucun serveur MCP configuré.<br>Ajoutez-en via les Paramètres.</div>';
+    return;
+  }
+  servers.forEach(s => {
+    const li = document.createElement('li');
+    const on = s.enabled !== false;
+    li.innerHTML = `
+      <span class="mcp-status-dot ${on ? 'enabled' : 'disabled'}"></span>
+      <span class="mcp-status-name">${s.name}</span>
+      <span class="mcp-status-state">${on ? 'Actif' : 'Inactif'}</span>
+    `;
+    listEl.appendChild(li);
+  });
+}
+
+function updateSidebarStatus() {
+  const iconEl = document.querySelector('#status-active-agent .status-icon');
+  const labelEl = document.querySelector('#status-active-agent .status-label');
+  if (iconEl && labelEl && activeAgent) {
+    iconEl.textContent = activeAgent.icon || '';
+    labelEl.textContent = activeAgent.name || '';
+  }
+}
+
+function setupSidebarExtras() {
+  // Dropdown statut MCP
+  const toggleBtn = document.getElementById('mcp-status-toggle');
+  const dropdown = document.getElementById('mcp-status-dropdown');
+  const closeBtn = document.getElementById('mcp-status-close');
+  if (toggleBtn && dropdown) {
+    toggleBtn.onclick = (e) => {
+      e.stopPropagation();
+      dropdown.classList.toggle('open');
+      toggleBtn.classList.toggle('open');
+    };
+    document.addEventListener('click', (e) => {
+      if (!dropdown.contains(e.target)) {
+        dropdown.classList.remove('open');
+        toggleBtn.classList.remove('open');
+      }
+    });
+  }
+  if (closeBtn && dropdown) {
+    closeBtn.onclick = () => dropdown.classList.remove('open');
+  }
+
+  // Boutons déplier/replier toutes les catégories
+  const expandAll = document.getElementById('expand-all-categories');
+  const collapseAll = document.getElementById('collapse-all-categories');
+  if (expandAll) expandAll.onclick = () => window.expandAllCategories();
+  if (collapseAll) collapseAll.onclick = () => window.collapseAllCategories();
+}
+
+// ─── Mode d'affichage des noms (always / hover / reduced) ────────────
+
+function applyTooltipMode() {
+  const mode = appConfig.tooltip_mode || 'hover';
+  document.body.classList.remove('tooltip-always', 'tooltip-hover', 'tooltip-reduced');
+  document.body.classList.add(`tooltip-${mode}`);
 }
 
 function setMcpStatus(message, kind = 'loading') {
@@ -348,6 +425,7 @@ async function handleToolCalls(text) {
 async function init() {
   renderAgents();
   setupEventListeners();
+  setupSidebarExtras();
 
   // Charger d'abord la configuration légère, puis laisser le temps au rendu de s'afficher.
   const loadedConfig = await invoke('load_config').catch(() => ({}));
@@ -361,8 +439,13 @@ async function init() {
 
   updateSystemStatus();
   applyTypography();
+  applyTooltipMode();
+  renderMcpStatusBar();
+  updateSidebarStatus();
   if (appConfig.font_family) document.getElementById('settings-font-family').value = appConfig.font_family;
   if (appConfig.font_size) document.getElementById('settings-font-size').value = appConfig.font_size;
+  const tooltipModeSelect = document.getElementById('settings-tooltip-mode');
+  if (tooltipModeSelect) tooltipModeSelect.value = appConfig.tooltip_mode || 'hover';
   selectAgent(agents[0].id, false);
   await startListeners();
 
@@ -374,6 +457,9 @@ async function init() {
       allMessages = loadedHistory;
       renderChatHistoryIncremental();
 
+      // Charger la liste des conversations
+      await refreshConversationList();
+
       ollamaAvailable = await invoke('check_ollama').catch(() => false);
       updateSystemStatus();
 
@@ -384,10 +470,23 @@ async function init() {
   });
 }
 
+let currentReActDepth = 0; // Profondeur actuelle de la boucle ReAct
+const MAX_REACT_DEPTH = 5; // Sécurité anti-boucle infinie
+
 async function handleReActLoop(rawText, msgEl) {
   const { hasCalls, newText } = await handleToolCalls(rawText);
   
   if (hasCalls) {
+    // Sécurité : arrêter si trop d'itérations
+    if (currentReActDepth >= MAX_REACT_DEPTH) {
+      console.warn(`Limite ReAct atteinte (${MAX_REACT_DEPTH} itérations).`);
+      msgEl.dataset.raw = newText + `\n\n> ⚠️ Nombre maximum d'actions consécutives atteint (${MAX_REACT_DEPTH}). Répondez à nouveau pour continuer.`;
+      msgEl.innerHTML = marked.parse(msgEl.dataset.raw);
+      currentReActDepth = 0;
+      return;
+    }
+    currentReActDepth++;
+    
     // Masquer les appels bruts et montrer les résultats
     msgEl.dataset.raw = newText;
     msgEl.innerHTML = marked.parse(newText);
@@ -404,6 +503,7 @@ async function handleReActLoop(rawText, msgEl) {
       sendMessage(true); // true pour dire "poursuite automatique"
     }, 500);
   } else {
+    currentReActDepth = 0; // Reset quand l'agent a terminé
     // Si des sources ont été utilisées, on les ajoute au dernier message
     const lastMsg = allMessages[allMessages.length - 1];
     if (lastMsg && lastMsg.role === 'ai' && currentUsedSources.length > 0) {
@@ -461,7 +561,20 @@ function getToolsPrompt() {
   }
 
   if (fsSelected) {
-    p += `\n[RÈGLE ABSOLUE FILESYSTEM]\nLe serveur MCP Filesystem est ACTIF. Tu as accès complet aux fichiers locaux. INTERDICTION de répondre "Je ne peux pas accéder aux fichiers". Utilise IMMÉDIATEMENT [[tool:mcp__${fsServer.id}/list_directory?{"path":"..."}]] pour explorer, ou [[tool:mcp__${fsServer.id}/read_file?{"path":"..."}]] pour lire.\n`;
+    p += `\n[RÈGLE ABSOLUE FILESYSTEM]
+Le serveur MCP Filesystem est ACTIF avec des capacités COMPLÈTES :
+- list_directory : explorer un dossier
+- read_file : lire un fichier
+- write_file : créer/écraser un fichier
+- create_directory : créer un dossier
+- delete_entry : supprimer (demander confirmation à l'utilisateur avant !)
+- move_entry : déplacer/renommer
+- search_files : chercher par nom
+
+Tu as accès complet aux fichiers locaux. INTERDICTION de répondre "Je ne peux pas accéder aux fichiers".
+Pour une demande comme "range mes fichiers" ou "crée un rapport", enchaîne plusieurs outils sans redemander.
+Pour les actions destructrices (delete_entry), confirme d'abord avec l'utilisateur.
+Utilise [[tool:mcp__${fsServer.id}/<outil>?{...}]] pour agir.\n`;
     hasTools = true;
   }
 
@@ -795,6 +908,7 @@ async function startListeners() {
         sources: [...currentUsedSources] 
       });
       saveHistory();
+      tryAutoTitle();
 
       currentMessageEl = null; 
       currentRequestId = null;
@@ -832,10 +946,115 @@ function updateSystemStatus() {
   }
 }
 
+// ─── Rendu des agents par catégories dépliables ──────────────────────
+
+let collapsedCategories = JSON.parse(localStorage.getItem('collapsedCategories') || '[]');
+
 function renderAgents() {
+  const container = document.getElementById('agent-categories');
+  if (!container) { renderAgentsLegacy(); return; }
+  container.innerHTML = '';
+
+  // Grouper par catégorie, favoris d'abord dans une catégorie "Favoris"
+  const favs = agents.filter(a => favoriteAgents.includes(a.id));
+  const groups = new Map();
+  if (favs.length) groups.set('Favoris', favs);
+  agents.forEach(a => {
+    const cat = a.category || 'Général';
+    if (!groups.has(cat)) groups.set(cat, []);
+    if (!favoriteAgents.includes(a.id)) groups.get(cat).push(a);
+  });
+
+  groups.forEach((list, cat) => {
+    const section = document.createElement('div');
+    section.className = `agent-category ${collapsedCategories.includes(cat) ? 'collapsed' : ''}`;
+    section.dataset.category = cat;
+
+    // Indiquer si l'agent actif se trouve dans une catégorie repliée
+    const hasActive = list.some(a => a.id === activeAgent.id);
+    if (hasActive && collapsedCategories.includes(cat)) section.classList.add('contains-active');
+
+    const header = document.createElement('button');
+    header.className = `category-header ${collapsedCategories.includes(cat) ? '' : 'open'}`;
+    header.innerHTML = `
+      <span class="category-name">${cat === 'Favoris' ? '★ ' : ''}${cat}</span>
+      <span class="category-count">${list.length}</span>
+      <span class="category-chevron">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </span>
+    `;
+    if (hasActive) {
+      const dot = document.createElement('span');
+      dot.className = 'category-active-dot';
+      dot.title = 'Agent actif ici';
+      header.insertBefore(dot, header.firstChild);
+    }
+    header.onclick = () => toggleCategory(cat);
+
+    const bodyWrapper = document.createElement('div');
+    bodyWrapper.className = 'category-body-wrapper';
+
+    const body = document.createElement('div');
+    body.className = 'category-body';
+    list.forEach((agent, i) => {
+      const item = buildAgentItem(agent);
+      // Apparition en cascade légère quand la catégorie est ouverte
+      if (!collapsedCategories.includes(cat)) {
+        item.style.animation = `slideUp var(--duration-normal) var(--ease-out) ${i * 30}ms backwards`;
+      }
+      body.appendChild(item);
+    });
+
+    bodyWrapper.appendChild(body);
+    section.appendChild(header);
+    section.appendChild(bodyWrapper);
+    container.appendChild(section);
+  });
+}
+
+function buildAgentItem(agent) {
+  const li = document.createElement('li');
+  li.className = `agent-item ${activeAgent.id === agent.id ? 'active' : ''}`;
+  const isFav = favoriteAgents.includes(agent.id);
+  li.innerHTML = `
+    <div class="agent-icon">${agent.icon}</div>
+    <div class="agent-tooltip">${agent.name}</div>
+    <button class="fav-btn ${isFav ? 'active' : ''}" onclick="window.toggleFavorite(event, '${agent.id}')">
+      ${isFav ? '★' : '☆'}
+    </button>
+  `;
+  li.onclick = (e) => {
+    if (e.target.closest('.fav-btn')) return;
+    selectAgent(agent.id);
+  };
+  return li;
+}
+
+function toggleCategory(cat) {
+  const idx = collapsedCategories.indexOf(cat);
+  if (idx >= 0) collapsedCategories.splice(idx, 1);
+  else collapsedCategories.push(cat);
+  localStorage.setItem('collapsedCategories', JSON.stringify(collapsedCategories));
+  renderAgents();
+}
+
+window.expandAllCategories = () => {
+  collapsedCategories = [];
+  localStorage.setItem('collapsedCategories', '[]');
+  renderAgents();
+};
+
+window.collapseAllCategories = () => {
+  collapsedCategories = [...new Set(agents.map(a => a.category || 'Général'))];
+  localStorage.setItem('collapsedCategories', JSON.stringify(collapsedCategories));
+  renderAgents();
+};
+
+// Fallback si le nouveau conteneur est absent
+function renderAgentsLegacy() {
   agentList.innerHTML = '';
-  
-  // Trier les agents : favoris en premier
   const sortedAgents = [...agents].sort((a, b) => {
     const aFav = favoriteAgents.includes(a.id);
     const bFav = favoriteAgents.includes(b.id);
@@ -843,26 +1062,7 @@ function renderAgents() {
     if (!aFav && bFav) return 1;
     return 0;
   });
-
-  sortedAgents.forEach((agent, index) => {
-    const li = document.createElement('li');
-    li.className = `agent-item ${activeAgent.id === agent.id ? 'active' : ''}`;
-    
-    const isFav = favoriteAgents.includes(agent.id);
-    
-    li.innerHTML = `
-      <div class="agent-icon">${agent.icon}</div>
-      <div class="agent-tooltip">${agent.name}</div>
-      <button class="fav-btn ${isFav ? 'active' : ''}" onclick="window.toggleFavorite(event, '${agent.id}')">
-        ${isFav ? '★' : '☆'}
-      </button>
-    `;
-    li.onclick = (e) => {
-      if (e.target.closest('.fav-btn')) return;
-      selectAgent(agent.id);
-    };
-    agentList.appendChild(li);
-  });
+  sortedAgents.forEach(agent => agentList.appendChild(buildAgentItem(agent)));
 }
 
 window.toggleFavorite = (e, id) => {
@@ -883,6 +1083,175 @@ function applyTypography() {
   document.documentElement.style.setProperty('--app-font-size', appConfig.font_size || '15px');
 }
 
+// ─── Model Picker (dropdown custom avec recherche + filtres) ──────────
+
+// Stockage : modèle choisi manuellement par agent (sinon fallback sur agent.model)
+let agentModelOverrides = {}; // { agentId: modelName }
+
+// Cache des modèles OpenRouter avec métadonnées
+let openrouterModelsCache = null; // [{ id, name, isFree }]
+
+async function fetchOpenrouterModels() {
+  if (openrouterModelsCache) return openrouterModelsCache;
+  try {
+    const raw = await invoke('list_openrouter_models_detailed');
+    openrouterModelsCache = raw;
+  } catch {
+    openrouterModelsCache = [];
+  }
+  return openrouterModelsCache;
+}
+
+// État du picker
+const modelPickerState = {
+  models: [],       // liste plate d'IDs disponibles pour le provider actuel
+  details: {},      // id -> { name, isFree } (openrouter uniquement)
+  filter: 'all',
+  search: '',
+  highlighted: -1,
+};
+
+function modelPickerFiltered() {
+  const q = modelPickerState.search.toLowerCase();
+  return modelPickerState.models.filter(id => {
+    const det = modelPickerState.details[id];
+    if (modelPickerState.filter === 'free' && !(det?.isFree)) return false;
+    if (modelPickerState.filter === 'paid' && (det?.isFree)) return false;
+    if (q && !id.toLowerCase().includes(q) && !(det?.name || '').toLowerCase().includes(q)) return false;
+    return true;
+  });
+}
+
+function renderModelPickerList() {
+  const listEl = document.getElementById('model-picker-list');
+  if (!listEl) return;
+  const filtered = modelPickerFiltered();
+
+  if (filtered.length === 0) {
+    listEl.innerHTML = '<div class="model-picker-empty">Aucun modèle trouvé</div>';
+    return;
+  }
+
+  const current = agentModelOverrides[activeAgent.id] || '';
+  const maxShown = 300; // évite de rendre 419 nodes d'un coup
+
+  listEl.innerHTML = filtered.slice(0, maxShown).map((id, i) => {
+    const det = modelPickerState.details[id];
+    const freeBadge = det?.isFree ? '<span class="badge-free">Gratuit</span>' : '';
+    const sub = det?.name && det.name !== id ? `<div class="model-name">${det.name}</div>` : '';
+    return `
+      <div class="model-option ${id === current ? 'selected' : ''} ${i === modelPickerState.highlighted ? 'highlighted' : ''}" data-model="${id}" role="option" aria-selected="${id === current}">
+        <div style="min-width:0; flex-grow:1;">
+          <div class="model-id">${id}</div>
+          ${sub}
+        </div>
+        <div class="model-meta">${freeBadge}</div>
+      </div>`;
+  }).join('') + (filtered.length > maxShown ? `<div class="model-picker-empty">+ ${filtered.length - maxShown} autres… affinez la recherche</div>` : '');
+
+  // Clic sur une option
+  listEl.querySelectorAll('.model-option').forEach(opt => {
+    opt.addEventListener('click', () => {
+      selectModel(opt.dataset.model);
+    });
+  });
+}
+
+function selectModel(modelId) {
+  closeModelPicker();
+  const label = document.getElementById('model-picker-label');
+  const badge = document.getElementById('active-agent-model');
+
+  if (!modelId) {
+    delete agentModelOverrides[activeAgent.id];
+    if (label) label.textContent = `Par défaut (${activeAgent.model})`;
+    if (badge) badge.innerText = activeAgent.model;
+  } else {
+    agentModelOverrides[activeAgent.id] = modelId;
+    if (label) label.textContent = modelId;
+    if (badge) badge.innerText = modelId;
+  }
+}
+
+function openModelPicker() {
+  const dropdown = document.getElementById('model-picker-dropdown');
+  const btn = document.getElementById('model-picker-btn');
+  if (!dropdown || !btn) return;
+  dropdown.style.display = 'flex';
+  document.getElementById('model-picker').classList.add('open');
+  btn.setAttribute('aria-expanded', 'true');
+  modelPickerState.highlighted = -1;
+  renderModelPickerList();
+  setTimeout(() => document.getElementById('model-picker-search')?.focus(), 30);
+}
+
+function closeModelPicker() {
+  const dropdown = document.getElementById('model-picker-dropdown');
+  const btn = document.getElementById('model-picker-btn');
+  if (!dropdown) return;
+  dropdown.style.display = 'none';
+  document.getElementById('model-picker')?.classList.remove('open');
+  btn?.setAttribute('aria-expanded', 'false');
+}
+
+async function populateAgentModelSelect() {
+  const label = document.getElementById('model-picker-label');
+  if (!label) return;
+
+  const provider = getProvider();
+  let options = [];
+  modelPickerState.details = {};
+  modelPickerState.filter = 'all';
+  modelPickerState.search = '';
+
+  const searchInput = document.getElementById('model-picker-search');
+  if (searchInput) searchInput.value = '';
+  document.querySelectorAll('.model-filter-chip').forEach(c => c.classList.toggle('active', c.dataset.filter === 'all'));
+
+  try {
+    if (provider === 'ollama') {
+      options = await invoke('list_ollama_models').catch(() => []);
+    } else if (provider === 'lmstudio') {
+      options = await invoke('list_lmstudio_models').catch(() => []);
+    } else if (provider === 'openrouter') {
+      const detailed = await fetchOpenrouterModels();
+      options = detailed.map(m => m.id);
+      detailed.forEach(m => { modelPickerState.details[m.id] = m; });
+    }
+  } catch { /* providers indisponibles */ }
+
+  // Fallback statique si rien de disponible
+  if (options.length === 0) {
+    if (provider === 'openai') options = ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'];
+    else if (provider === 'gemini') options = ['gemini-1.5-flash', 'gemini-1.5-pro'];
+    else if (provider === 'anthropic') options = ['claude-3-5-sonnet-latest', 'claude-3-opus-latest'];
+  }
+
+  modelPickerState.models = options;
+
+  const override = agentModelOverrides[activeAgent.id];
+  if (override) {
+    label.textContent = override;
+  } else {
+    label.textContent = `Par défaut (${activeAgent.model})`;
+  }
+
+  // Masquer les filtres gratuit/payant si pas de métadonnées (providers locaux)
+  const filtersRow = document.querySelector('.model-picker-filters');
+  if (filtersRow) {
+    filtersRow.style.display = Object.keys(modelPickerState.details).length > 0 ? 'flex' : 'none';
+  }
+}
+
+function listScrollToHighlighted() {
+  const el = document.querySelector('.model-option.highlighted');
+  if (el) el.scrollIntoView({ block: 'nearest' });
+}
+
+function getModelForCurrentRequest() {
+  return agentModelOverrides[activeAgent.id] || activeAgent.model;
+}
+
 window.selectAgent = async (id, shouldWelcome = true) => {
   // Arrêter toute génération en cours lors du changement d'agent
   if (currentMessageEl) {
@@ -895,15 +1264,30 @@ window.selectAgent = async (id, shouldWelcome = true) => {
   renderAgents();
   activeAgentName.innerText = activeAgent.name;
   activeAgentDesc.innerText = activeAgent.desc;
+  updateSidebarStatus();
   const modelEl = document.getElementById('active-agent-model');
   if (modelEl) modelEl.innerText = activeAgent.model;
+
+  // Remplir le sélecteur de modèle du header pour cet agent
+  await populateAgentModelSelect();
   
   // Mise à jour du placeholder pour rappeler les commandes
   chatInput.placeholder = `Parler à ${activeAgent.name} (tapez /help pour les commandes)`;
+
+  // Changer d'agent = quitter la conversation courante (1 conversation = 1 agent)
+  const convMeta = conversations.find(c => c.id === currentConversationId);
+  if (!convMeta || convMeta.agent_id !== id) {
+    currentConversationId = null;
+    autoTitleDone = false;
+  }
+  renderConversationList();
   
   renderChatHistory();
   if (shouldWelcome && !allMessages.some(m => m.agent_id === activeAgent.id)) {
-    addMessage('ai', `Bonjour ! Je suis ${activeAgent.name}.`);
+    // Message de bienvenue non persisté : ne crée pas de conversation vide
+    addMessage('ai', `Bonjour ! Je suis ${activeAgent.name}.`, null, false);
+    // Le retirer de allMessages juste après l'affichage (addMessage avec shouldSave=false ne l'ajoute pas,
+    // mais on veut aussi qu'il disparaisse au prochain renderChatHistory)
   }
 };
 
@@ -911,15 +1295,24 @@ function renderChatHistory() {
   chatContainer.innerHTML = '';
   const msgs = allMessages.filter(m => m.agent_id === activeAgent.id);
   if (msgs.length === 0) {
+    const suggestions = (activeAgent.commands || [])
+      .slice(0, 4)
+      .map(c => `<button class="suggestion-chip" data-cmd="${c.cmd}">${c.cmd} — ${c.desc}</button>`)
+      .join('');
     chatContainer.innerHTML = `
       <div class="empty-state">
         <div class="icon">${activeAgent.icon}</div>
-        <p>Je suis votre expert <strong>${activeAgent.name}</strong>.</p>
-        <p style="font-size: 0.8rem; opacity: 0.6; margin-top: 10px;">
-          Tapez <code>/help</code> pour découvrir mes commandes magiques.
-        </p>
+        <h3>${activeAgent.name}</h3>
+        <p>${activeAgent.desc}</p>
+        ${suggestions ? `<div class="empty-suggestions">${suggestions}</div>` : ''}
       </div>
     `;
+    chatContainer.querySelectorAll('.suggestion-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        chatInput.value = chip.dataset.cmd + ' ';
+        chatInput.focus();
+      });
+    });
     return;
   }
   msgs.forEach(m => {
@@ -971,6 +1364,92 @@ function renderSourcesBadge(wrapper, sources) {
   wrapper.appendChild(sourcesContainer);
 }
 
+// ─── Aperçu d'app web générée (HTML/CSS/JS) ──────────────────────────────
+
+// Détecte si le texte contient une app web complète et attache une carte d'aperçu au message
+function attachPreviewCardIfWebApp(msgEl, text) {
+  // Cherche un bloc de code HTML avec <!DOCTYPE ou <html (complet)
+  const htmlBlockMatch = text.match(/```html\s*([\s\S]*?)```/i);
+  if (!htmlBlockMatch) return;
+  const htmlContent = htmlBlockMatch[1];
+  const isFullPage = /<!DOCTYPE|<html/i.test(htmlContent);
+  const hasBody = /<body/i.test(htmlContent);
+  if (!isFullPage && !hasBody) return;
+
+  const wrapper = msgEl.closest('.message-wrapper');
+  if (!wrapper || wrapper.querySelector('.webapp-preview-card')) return;
+
+  const card = document.createElement('div');
+  card.className = 'webapp-preview-card';
+  card.innerHTML = `
+    <div class="webapp-preview-info">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+        <line x1="8" y1="21" x2="16" y2="21"></line>
+        <line x1="12" y1="17" x2="12" y2="21"></line>
+      </svg>
+      <span>Application web détectée — prévisualisez-la en un clic</span>
+    </div>
+    <button class="webapp-open-btn">▶ Aperçu live</button>
+  `;
+  card.querySelector('.webapp-open-btn').addEventListener('click', () => {
+    openWebAppPreview(htmlContent);
+  });
+  wrapper.appendChild(card);
+}
+
+// Ouvre une fenêtre flottante avec l'app rendue dans un iframe sandboxé
+function openWebAppPreview(htmlContent) {
+  // Ferme l'aperçu existant s'il y en a un
+  closeWebAppPreview();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'webapp-preview-overlay';
+  overlay.className = 'webapp-preview-overlay';
+  overlay.innerHTML = `
+    <div class="webapp-preview-window">
+      <div class="webapp-preview-header">
+        <span class="webapp-preview-title">Aperçu de l'application</span>
+        <div class="webapp-preview-actions">
+          <button id="webapp-reload" title="Recharger">⟳</button>
+          <button id="webapp-external" title="Ouvrir dans le navigateur">↗</button>
+          <button id="webapp-close" title="Fermer">✕</button>
+        </div>
+      </div>
+      <iframe id="webapp-frame" sandbox="allow-scripts allow-forms allow-modals"></iframe>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const frame = overlay.querySelector('#webapp-frame');
+  frame.srcdoc = htmlContent;
+
+  overlay.querySelector('#webapp-close').onclick = closeWebAppPreview;
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeWebAppPreview();
+  });
+  overlay.querySelector('#webapp-reload').onclick = () => { frame.srcdoc = htmlContent; };
+  overlay.querySelector('#webapp-external').onclick = () => {
+    // Sauvegarde temporaire puis ouverture dans le navigateur par défaut via Tauri opener
+    const blob = new Blob([htmlContent], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank');
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  };
+  document.addEventListener('keydown', function escClose(e) {
+    if (e.key === 'Escape') {
+      closeWebAppPreview();
+      document.removeEventListener('keydown', escClose);
+    }
+  });
+}
+
+function closeWebAppPreview() {
+  const existing = document.getElementById('webapp-preview-overlay');
+  if (existing) existing.remove();
+}
+window.closeWebAppPreview = closeWebAppPreview;
+
 function addMessage(role, text, images = null, shouldSave = true, cmd_used = null) {
   // Enlever l'état vide si présent
   const emptyState = chatContainer.querySelector('.empty-state');
@@ -1010,6 +1489,8 @@ function addMessage(role, text, images = null, shouldSave = true, cmd_used = nul
     contentEl.querySelectorAll('pre code').forEach((block) => {
       hljs.highlightElement(block);
     });
+    // Détection d'une app web complète (HTML) → carte d'aperçu
+    attachPreviewCardIfWebApp(msgEl, text);
   } else {
     contentEl.innerText = text;
   }
@@ -1207,8 +1688,167 @@ function deleteMessage(role, content) {
 }
 
 async function saveHistory() {
-  try { await invoke('save_history', { messages: allMessages }); } catch (e) { console.error(e); }
+  try {
+    // Sauvegarde dans la conversation active (création automatique si brouillon)
+    if (!currentConversationId) {
+      currentConversationId = `conv-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+    }
+    const agentMessages = allMessages.filter(m => m.agent_id === activeAgent.id);
+    const meta = await invoke('save_conversation', {
+      conversationId: currentConversationId,
+      title: conversationTitle(agentMessages),
+      agentId: activeAgent.id,
+      messages: agentMessages
+    });
+    await refreshConversationList();
+  } catch (e) { console.error('Erreur sauvegarde conversation:', e); }
 }
+
+// Génère un titre : première question utilisateur tronquée, sinon titre par défaut
+function conversationTitle(messages) {
+  const firstUserMsg = messages.find(m => m.role === 'user');
+  if (firstUserMsg) {
+    const t = firstUserMsg.content.trim().replace(/\s+/g, ' ');
+    return t.length > 40 ? t.substring(0, 40) + '…' : t;
+  }
+  return null;
+}
+
+// Auto-title IA : appelé une fois après la première réponse complète.// Remplace le titre tronqué par un titre intelligent si Ollama est dispo.
+let autoTitleDone = false;
+async function tryAutoTitle() {
+  if (autoTitleDone || !currentConversationId || !ollamaAvailable) return;
+  const agentMessages = allMessages.filter(m => m.agent_id === activeAgent.id);
+  const firstUser = agentMessages.find(m => m.role === 'user');
+  const firstAi = agentMessages.find(m => m.role === 'ai');
+  if (!firstUser || !firstAi) return;
+
+  autoTitleDone = true;
+  try {
+    const title = await invoke('generate_conversation_title', {
+      firstMessage: firstUser.content
+    });
+    if (title && currentConversationId) {
+      await invoke('rename_conversation', { conversationId: currentConversationId, title });
+      await refreshConversationList();
+    }
+  } catch (e) {
+    // Silencieux : on garde le titre tronqué par défaut
+    console.debug('Auto-title ignoré:', e);
+  }
+}
+
+async function refreshConversationList() {
+  try {
+    conversations = await invoke('list_conversations');
+    renderConversationList();
+  } catch (e) { console.error('Erreur liste conversations:', e); }
+}
+
+// Recherche : filtre par titre ET par contenu des messages
+let conversationSearchCache = {}; // id -> messages (rempli à la demande)
+
+function filterConversations(query) {
+  const q = (query || '').toLowerCase().trim();
+  if (!q) return conversations;
+  return conversations.filter(conv => {
+    if ((conv.title || '').toLowerCase().includes(q)) return true;
+    return false; // le contenu est filtré de façon asynchrone ci-dessous
+  });
+}
+
+async function searchInConversationContents(q, candidates) {
+  // Charge les contenus manquants puis filtre
+  const results = [];
+  for (const conv of candidates) {
+    try {
+      const [, msgs] = await invoke('load_conversation', { conversationId: conv.id });
+      const match = msgs.some(m => (m.content || '').toLowerCase().includes(q));
+      if (match) results.push(conv);
+    } catch { /* conversation illisible, on l'ignore */ }
+  }
+  return results;
+}
+
+function renderConversationList(listOverride = null) {
+  const listEl = document.getElementById('conversation-list');
+  if (!listEl) return;
+  const items = listOverride || conversations;
+  listEl.innerHTML = '';
+
+  if (items.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'conversations-empty';
+    empty.textContent = listOverride ? 'Aucun résultat' : 'Aucune conversation';
+    listEl.appendChild(empty);
+    return;
+  }
+
+  items.forEach(conv => {
+    const li = document.createElement('li');
+    li.className = `conversation-item ${conv.id === currentConversationId ? 'active' : ''}`;
+    li.title = conv.title || 'Sans titre';
+
+    const agent = agents.find(a => a.id === conv.agent_id);
+    const icon = agent ? agent.icon : '💬';
+    const title = conv.title || 'Sans titre';
+
+    li.innerHTML = `
+      <span class="conv-icon">${icon}</span>
+      <span class="conv-title">${title}</span>
+      <button class="conv-delete-btn" title="Supprimer" aria-label="Supprimer la conversation">✕</button>
+    `;
+
+    li.onclick = (e) => {
+      if (e.target.closest('.conv-delete-btn')) return;
+      selectConversation(conv.id);
+    };
+
+    li.querySelector('.conv-delete-btn').onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Supprimer « ${title} » ?`)) return;
+      try {
+        await invoke('delete_conversation', { conversationId: conv.id });
+        if (currentConversationId === conv.id) {
+          currentConversationId = null;
+          allMessages = allMessages.filter(m => m.agent_id !== conv.agent_id);
+          selectAgent(activeAgent.id, false);
+        }
+        await refreshConversationList();
+      } catch (err) { console.error('Erreur suppression:', err); }
+    };
+
+    listEl.appendChild(li);
+  });
+}
+
+window.selectConversation = async (conversationId) => {
+  try {
+    const [meta, msgs] = await invoke('load_conversation', { conversationId });
+    currentConversationId = conversationId;
+
+    // Basculer vers l'agent de la conversation si différent
+    if (meta.agent_id !== activeAgent.id) {
+      await window.selectAgent(meta.agent_id, false);
+    }
+
+    // Remplacer les messages de cet agent par ceux de la conversation
+    allMessages = allMessages.filter(m => m.agent_id !== meta.agent_id).concat(msgs);
+    renderChatHistoryIncremental();
+    renderConversationList();
+  } catch (err) {
+    console.error('Erreur chargement conversation:', err);
+  }
+};
+
+window.startNewConversation = () => {
+  currentConversationId = null;
+  // Retirer les messages de l'agent actif de la mémoire (ils restent dans leur fichier)
+  allMessages = allMessages.filter(m => m.agent_id !== activeAgent.id);
+  renderChatHistory();
+  renderConversationList();
+  chatInput.focus();
+};
 
 function getProvider() {
   if (!ollamaAvailable && appConfig.default_provider === 'ollama') {
@@ -1434,8 +2074,8 @@ async function sendMessage(isAutoResponse = false) {
 
     if (provider === 'ollama') {
       try {
-        // Fallback intelligent si le modèle de l'agent n'existe pas en local
-        let modelToUse = activeAgent.model;
+        // Modèle choisi manuellement > modèle de l'agent > fallback préféré
+        let modelToUse = getModelForCurrentRequest();
         const localModels = await invoke('list_ollama_models').catch(() => []);
         if (!localModels.includes(modelToUse) && appConfig.preferred_models?.ollama) {
           console.warn(`Modèle agent '${modelToUse}' non trouvé. Utilisation du modèle préféré: ${appConfig.preferred_models.ollama}`);
@@ -1453,8 +2093,8 @@ async function sendMessage(isAutoResponse = false) {
     }
     } else if (provider === 'lmstudio') {
       try {
-        // Fallback intelligent pour LM Studio
-        let modelToUse = activeAgent.model;
+        // Modèle choisi manuellement > modèle de l'agent > fallback préféré (LM Studio)
+        let modelToUse = getModelForCurrentRequest();
         const localModels = await invoke('list_lmstudio_models').catch(() => []);
         if (!localModels.includes(modelToUse) && appConfig.preferred_models?.lmstudio) {
           console.warn(`Modèle agent '${modelToUse}' non trouvé sur LM Studio. Utilisation du modèle préféré: ${appConfig.preferred_models.lmstudio}`);
@@ -1580,7 +2220,7 @@ async function callCloudStream(provider, systemPrompt, userMessage, images) {
   const badge = document.createElement('span');
   badge.className = 'cloud-badge';
   
-  let displayModel = appConfig.preferred_models[provider] || activeAgent.model;
+  let displayModel = agentModelOverrides[activeAgent.id] || appConfig.preferred_models[provider] || activeAgent.model;
   
   if (provider === 'openai') { badge.innerText = '☁ OpenAI (Fallback)'; }
   else if (provider === 'gemini') { badge.innerText = '✨ Gemini (Fallback)'; }
@@ -1847,7 +2487,93 @@ function setupEventListeners() {
   document.getElementById('clear-btn').addEventListener('click', async () => {
     allMessages = allMessages.filter(m => m.agent_id !== activeAgent.id);
     await saveHistory();
-    chatContainer.innerHTML = `<div class="empty-state"><div class="icon">${activeAgent.icon}</div><p>Historique effacé.</p></div>`;
+    renderChatHistory();
+  });
+
+  // Nouvelle conversation
+  document.getElementById('new-conversation-btn').addEventListener('click', () => {
+    window.startNewConversation();
+  });
+
+  // Model Picker (dropdown avec recherche + filtres)
+  const pickerBtn = document.getElementById('model-picker-btn');
+  if (pickerBtn) {
+    pickerBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const dropdown = document.getElementById('model-picker-dropdown');
+      if (dropdown.style.display === 'none' || !dropdown.style.display) {
+        openModelPicker();
+      } else {
+        closeModelPicker();
+      }
+    });
+  }
+
+  const pickerSearch = document.getElementById('model-picker-search');
+  if (pickerSearch) {
+    pickerSearch.addEventListener('input', () => {
+      modelPickerState.search = pickerSearch.value;
+      modelPickerState.highlighted = -1;
+      renderModelPickerList();
+    });
+    pickerSearch.addEventListener('keydown', (e) => {
+      const filtered = modelPickerFiltered();
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        modelPickerState.highlighted = Math.min(modelPickerState.highlighted + 1, filtered.length - 1);
+        renderModelPickerList();
+        listScrollToHighlighted();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        modelPickerState.highlighted = Math.max(modelPickerState.highlighted - 1, 0);
+        renderModelPickerList();
+        listScrollToHighlighted();
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        const idx = modelPickerState.highlighted >= 0 ? modelPickerState.highlighted : 0;
+        if (filtered[idx]) selectModel(filtered[idx]);
+      } else if (e.key === 'Escape') {
+        closeModelPicker();
+      }
+    });
+  }
+
+  document.querySelectorAll('.model-filter-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('.model-filter-chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      modelPickerState.filter = chip.dataset.filter;
+      modelPickerState.highlighted = -1;
+      renderModelPickerList();
+    });
+  });
+
+  // Fermer le picker au clic extérieur
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#model-picker')) closeModelPicker();
+  });
+
+  // Recherche de conversations (debounce 250ms)
+  let searchTimeout = null;
+  const searchInput = document.getElementById('conversation-search');
+  searchInput.addEventListener('input', async () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(async () => {
+      const q = searchInput.value.trim();
+      if (!q) {
+        renderConversationList();
+        return;
+      }
+      // Filtre rapide par titre
+      const byTitle = filterConversations(q);
+      if (byTitle.length > 0) {
+        renderConversationList(byTitle);
+      }
+      // Puis recherche approfondie dans le contenu (async)
+      const candidates = byTitle.length > 0 ? byTitle : conversations;
+      const inContent = await searchInConversationContents(q.toLowerCase(), candidates);
+      renderConversationList(inContent);
+    }, 250);
   });
 
   document.getElementById('export-btn').addEventListener('click', () => {
@@ -2173,6 +2899,8 @@ function setupEventListeners() {
 
     appConfig.font_family = document.getElementById('settings-font-family').value;
     appConfig.font_size = document.getElementById('settings-font-size').value;
+    const tooltipModeEl = document.getElementById('settings-tooltip-mode');
+    if (tooltipModeEl) appConfig.tooltip_mode = tooltipModeEl.value;
     normalizeMcpServers();
     
     appConfig.custom_shortcuts = {
@@ -2182,6 +2910,7 @@ function setupEventListeners() {
     };
 
     applyTypography();
+    applyTooltipMode();
     await invoke('save_config', { config: appConfig });
     await invoke('save_mcp_servers', { servers: appConfig.mcp_servers || [] }).catch(() => {});
     setTimeout(() => {

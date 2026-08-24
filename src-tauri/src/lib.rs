@@ -190,6 +190,89 @@ fn filesystem_read_file(root: &PathBuf, path: String) -> Result<serde_json::Valu
     Ok(serde_json::json!({ "content": content }))
 }
 
+// Vérifie qu'un chemin reste dans la racine autorisée (anti-traversée)
+fn ensure_within_root(root: &PathBuf, rel: &str) -> Result<PathBuf, String> {
+    let mut target = root.clone();
+    if !rel.is_empty() {
+        target.push(rel);
+    }
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+    // On canonicalise seulement si le chemin existe ; sinon on valide par composants
+    let target_clean: PathBuf = target
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect();
+    if target_clean.exists() {
+        let canonical_target = target_clean.canonicalize().map_err(|e| e.to_string())?;
+        if !canonical_target.starts_with(&canonical_root) {
+            return Err("Accès refusé : chemin hors de la racine autorisée.".to_string());
+        }
+    }
+    Ok(target_clean)
+}
+
+fn fs_write_file(root: &PathBuf, path: String, content: String) -> Result<serde_json::Value, String> {
+    let target = ensure_within_root(root, &path)?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(&target, content).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "ok": true, "path": target.to_string_lossy() }))
+}
+
+fn fs_create_directory(root: &PathBuf, path: String) -> Result<serde_json::Value, String> {
+    let target = ensure_within_root(root, &path)?;
+    fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "ok": true, "path": target.to_string_lossy() }))
+}
+
+fn fs_delete_entry(root: &PathBuf, path: String) -> Result<serde_json::Value, String> {
+    let target = ensure_within_root(root, &path)?;
+    if !target.exists() {
+        return Err("Chemin introuvable.".to_string());
+    }
+    if target.is_dir() {
+        fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
+    } else {
+        fs::remove_file(&target).map_err(|e| e.to_string())?;
+    }
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+fn fs_move_entry(root: &PathBuf, source: String, destination: String) -> Result<serde_json::Value, String> {
+    let src = ensure_within_root(root, &source)?;
+    let dst = ensure_within_root(root, &destination)?;
+    if !src.exists() {
+        return Err("Source introuvable.".to_string());
+    }
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::rename(&src, &dst).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+fn fs_search_files(root: &PathBuf, pattern: String, max_results: Option<usize>) -> Result<serde_json::Value, String> {
+    use walkdir::WalkDir;
+    let needle = pattern.to_lowercase();
+    let limit = max_results.unwrap_or(50).min(200);
+    let mut matches = Vec::new();
+    for entry in WalkDir::new(root).max_depth(6).into_iter().filter_map(|e| e.ok()) {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if name.contains(&needle) {
+            matches.push(serde_json::json!({
+                "name": entry.file_name().to_string_lossy(),
+                "path": entry.path().to_string_lossy(),
+                "type": if entry.path().is_dir() { "directory" } else { "file" }
+            }));
+            if matches.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(serde_json::json!({ "matches": matches, "count": matches.len() }))
+}
+
 fn mcp_send_message(
     stdin: &mut std::process::ChildStdin,
     message: &serde_json::Value,
@@ -345,30 +428,60 @@ fn list_mcp_tools(app: AppHandle) -> Result<Vec<McpToolDescriptor>, String> {
             continue;
         }
         if is_filesystem_server(&server) {
-            tools.push(McpToolDescriptor {
-                server_id: server.id.clone(),
-                server_name: server.name.clone(),
-                name: "list_directory".to_string(),
-                description: Some("Liste le contenu d'un dossier à partir de la racine autorisée.".to_string()),
-                input_schema: serde_json::json!({
+            let fs_tools: Vec<(&str, &str, serde_json::Value)> = vec![
+                ("list_directory", "Liste le contenu d'un dossier à partir de la racine autorisée.", serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string", "description": "Chemin relatif depuis la racine configurée." } }
+                })),
+                ("read_file", "Lit un fichier texte à partir de la racine autorisée.", serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string", "description": "Chemin relatif du fichier." } },
+                    "required": ["path"]
+                })),
+                ("write_file", "Crée ou écrase un fichier avec le contenu fourni.", serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Chemin relatif depuis la racine configurée." }
-                    }
-                }),
-            });
-            tools.push(McpToolDescriptor {
-                server_id: server.id.clone(),
-                server_name: server.name.clone(),
-                name: "read_file".to_string(),
-                description: Some("Lit un fichier à partir de la racine autorisée.".to_string()),
-                input_schema: serde_json::json!({
+                        "path": { "type": "string", "description": "Chemin relatif du fichier à écrire." },
+                        "content": { "type": "string", "description": "Contenu complet du fichier." }
+                    },
+                    "required": ["path", "content"]
+                })),
+                ("create_directory", "Crée un dossier (et les parents nécessaires).", serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string", "description": "Chemin relatif du dossier." } },
+                    "required": ["path"]
+                })),
+                ("delete_entry", "Supprime définitivement un fichier ou un dossier (récursif pour les dossiers). Action irréversible.", serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string", "description": "Chemin relatif à supprimer." } },
+                    "required": ["path"]
+                })),
+                ("move_entry", "Déplace ou renomme un fichier/dossier.", serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Chemin relatif du fichier." }
-                    }
-                }),
-            });
+                        "source": { "type": "string", "description": "Chemin relatif source." },
+                        "destination": { "type": "string", "description": "Chemin relatif destination." }
+                    },
+                    "required": ["source", "destination"]
+                })),
+                ("search_files", "Recherche des fichiers/dossiers par nom (contient, insensible à la casse).", serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "Texte à chercher dans les noms." },
+                        "max_results": { "type": "integer", "description": "Nombre max de résultats (défaut 50)." }
+                    },
+                    "required": ["pattern"]
+                })),
+            ];
+            for (name, desc, schema) in fs_tools {
+                tools.push(McpToolDescriptor {
+                    server_id: server.id.clone(),
+                    server_name: server.name.clone(),
+                    name: name.to_string(),
+                    description: Some(desc.to_string()),
+                    input_schema: schema,
+                });
+            }
             continue;
         }
         let response = mcp_request(&server, "tools/list", serde_json::json!({}))?;
@@ -429,6 +542,29 @@ fn run_mcp_tool(
             "read_file" => {
                 let path = args["path"].as_str().unwrap_or("").to_string();
                 return filesystem_read_file(&root, path);
+            }
+            "write_file" => {
+                let path = args["path"].as_str().unwrap_or("").to_string();
+                let content = args["content"].as_str().unwrap_or("").to_string();
+                return fs_write_file(&root, path, content);
+            }
+            "create_directory" => {
+                let path = args["path"].as_str().unwrap_or("").to_string();
+                return fs_create_directory(&root, path);
+            }
+            "delete_entry" => {
+                let path = args["path"].as_str().unwrap_or("").to_string();
+                return fs_delete_entry(&root, path);
+            }
+            "move_entry" => {
+                let source = args["source"].as_str().unwrap_or("").to_string();
+                let destination = args["destination"].as_str().unwrap_or("").to_string();
+                return fs_move_entry(&root, source, destination);
+            }
+            "search_files" => {
+                let pattern = args["pattern"].as_str().unwrap_or("").to_string();
+                let max = args["max_results"].as_u64().map(|v| v as usize);
+                return fs_search_files(&root, pattern, max);
             }
             _ => return Err(format!("Outil filesystem inconnu: {}", tool_name)),
         }
@@ -726,6 +862,179 @@ fn load_history(app: AppHandle) -> Result<Vec<ChatMessage>, String> {
     })?;
     println!("{} messages chargés avec succès.", messages.len());
     Ok(messages)
+}
+
+// ─── Auto-title : génère un titre court pour une conversation ────────────────
+
+#[tauri::command]
+async fn generate_conversation_title(
+    state: tauri::State<'_, AppState>,
+    first_message: String,
+) -> Result<String, String> {
+    let prompt = format!(
+        "Génère un titre très court (3-5 mots maximum, sans guillemets, sans point final) qui résume ce sujet : \"{}\". Réponds UNIQUEMENT avec le titre, rien d'autre.",
+        first_message.chars().take(300).collect::<String>()
+    );
+
+    let res = state.client
+        .post("http://localhost:11434/api/generate")
+        .json(&serde_json::json!({
+            "model": "llama3",
+            "prompt": prompt,
+            "stream": false,
+            "options": { "temperature": 0.3, "num_predict": 30 }
+        }))
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !res.status().is_success() {
+        return Err(format!("Ollama erreur: {}", res.status()));
+    }
+
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let title = json["response"].as_str().unwrap_or("")
+        .trim()
+        .trim_matches('"')
+        .trim()
+        .to_string();
+
+    if title.is_empty() {
+        return Err("Titre vide".to_string());
+    }
+    Ok(title)
+}
+
+// ─── Conversations Multiples ───────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ConversationMeta {
+    pub id: String,
+    pub title: Option<String>,
+    pub agent_id: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub message_count: usize,
+}
+
+fn get_conversations_dir(app: &AppHandle) -> PathBuf {
+    let mut p = get_data_dir(app);
+    p.push("conversations");
+    if !p.exists() {
+        fs::create_dir_all(&p).unwrap();
+    }
+    p
+}
+
+fn conversation_path(dir: &PathBuf, id: &str) -> PathBuf {
+    // Sanitize l'id pour éviter la traversée de chemin
+    let safe_id: String = id.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    let mut p = dir.clone();
+    p.push(format!("{}.json", safe_id));
+    p
+}
+
+#[derive(Serialize, Deserialize)]
+struct ConversationFile {
+    meta: ConversationMeta,
+    messages: Vec<ChatMessage>,
+}
+
+#[tauri::command]
+fn list_conversations(app: AppHandle) -> Result<Vec<ConversationMeta>, String> {
+    let dir = get_conversations_dir(&app);
+    let mut conversations = Vec::new();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if let Ok(file) = serde_json::from_str::<ConversationFile>(&content) {
+                        conversations.push(file.meta);
+                    }
+                }
+            }
+        }
+    }
+    // Plus récentes en premier
+    conversations.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(conversations)
+}
+
+#[tauri::command]
+fn load_conversation(app: AppHandle, conversation_id: String) -> Result<(ConversationMeta, Vec<ChatMessage>), String> {
+    let dir = get_conversations_dir(&app);
+    let path = conversation_path(&dir, &conversation_id);
+    if !path.exists() {
+        return Err(format!("Conversation '{}' introuvable.", conversation_id));
+    }
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let file: ConversationFile = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    Ok((file.meta, file.messages))
+}
+
+#[tauri::command]
+fn save_conversation(
+    app: AppHandle,
+    conversation_id: String,
+    title: Option<String>,
+    agent_id: String,
+    messages: Vec<ChatMessage>,
+) -> Result<ConversationMeta, String> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+
+    let dir = get_conversations_dir(&app);
+    let path = conversation_path(&dir, &conversation_id);
+
+    // Conserver created_at existant si la conversation existe déjà
+    let created_at = if path.exists() {
+        fs::read_to_string(&path).ok()
+            .and_then(|c| serde_json::from_str::<ConversationFile>(&c).ok())
+            .map(|f| f.meta.created_at)
+            .unwrap_or(now)
+    } else {
+        now
+    };
+
+    let meta = ConversationMeta {
+        id: conversation_id,
+        title,
+        agent_id,
+        created_at,
+        updated_at: now,
+        message_count: messages.len(),
+    };
+
+    let file = ConversationFile { meta: meta.clone(), messages };
+    fs::write(&path, serde_json::to_string(&file).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("Erreur d'écriture conversation: {}", e))?;
+    Ok(meta)
+}
+
+#[tauri::command]
+fn rename_conversation(app: AppHandle, conversation_id: String, title: String) -> Result<(), String> {
+    let dir = get_conversations_dir(&app);
+    let path = conversation_path(&dir, &conversation_id);
+    if !path.exists() {
+        return Err(format!("Conversation '{}' introuvable.", conversation_id));
+    }
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut file: ConversationFile = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    file.meta.title = Some(title);
+    fs::write(&path, serde_json::to_string(&file).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_conversation(app: AppHandle, conversation_id: String) -> Result<(), String> {
+    let dir = get_conversations_dir(&app);
+    let path = conversation_path(&dir, &conversation_id);
+    if path.exists() {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 // ─── Config Commands ───────────────────────────────────────────────────────────
@@ -1152,6 +1461,71 @@ async fn list_lmstudio_models(app: AppHandle, state: tauri::State<'_, AppState>)
     Ok(models)
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct OpenRouterModelInfo {
+    id: String,
+    name: String,
+    is_free: bool,
+}
+
+#[tauri::command]
+async fn list_openrouter_models_detailed(state: tauri::State<'_, AppState>) -> Result<Vec<OpenRouterModelInfo>, String> {
+    let res = state.client
+        .get("https://openrouter.ai/api/v1/models")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Connexion OpenRouter échouée: {}", e))?;
+
+    if !res.status().is_success() {
+        return Err(format!("OpenRouter erreur: {}", res.status()));
+    }
+
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let mut models = Vec::new();
+    if let Some(data) = json["data"].as_array() {
+        for m in data {
+            let id = m["id"].as_str().unwrap_or("").to_string();
+            if id.is_empty() { continue; }
+            let name = m["name"].as_str().unwrap_or("").to_string();
+            // Gratuit si le slug finit par ":free" ou si pricing prompt/completion == "0"
+            let is_free = id.ends_with(":free")
+                || (m["pricing"]["prompt"].as_str().map(|p| p == "0").unwrap_or(false)
+                    && m["pricing"]["completion"].as_str().map(|p| p == "0").unwrap_or(false));
+            models.push(OpenRouterModelInfo { id, name, is_free });
+        }
+    }
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(models)
+}
+
+#[tauri::command]
+async fn list_openrouter_models(state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
+    let res = state.client
+        .get("https://openrouter.ai/api/v1/models")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Connexion OpenRouter échouée: {}", e))?;
+
+    if !res.status().is_success() {
+        return Err(format!("OpenRouter erreur: {}", res.status()));
+    }
+
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let mut models = Vec::new();
+    if let Some(data) = json["data"].as_array() {
+        for m in data {
+            if let Some(id) = m["id"].as_str() {
+                models.push(id.to_string());
+            }
+        }
+    }
+    // Tri alphabétique pour une liste navigable
+    models.sort();
+    Ok(models)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1169,6 +1543,8 @@ pub fn run() {
             ask_lmstudio_stream,
             list_ollama_models,
             ask_ollama_stream,
+            list_openrouter_models,
+            list_openrouter_models_detailed,
             ask_cloud_stream,
             save_history,
             load_history,
@@ -1192,6 +1568,12 @@ pub fn run() {
             get_desktop_dir,
             list_mcp_tools,
             run_mcp_tool,
+            list_conversations,
+            load_conversation,
+            save_conversation,
+            rename_conversation,
+            delete_conversation,
+            generate_conversation_title,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

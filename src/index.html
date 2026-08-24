@@ -5,11 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OmniAgent | Assistant IA Expert</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><defs><linearGradient id='g' x1='0%' y1='0%' x2='100%' y2='100%'><stop offset='0%' style='stop-color:%238b5cf6'/><stop offset='100%' style='stop-color:%233b82f6'/></linearGradient></defs><path d='M50 5L15 25V75L50 95L85 75V25L50 5Z' fill='none' stroke='url(%23g)' stroke-width='8'/><circle cx='50' cy='50' r='15' fill='url(%23g)'/></svg>">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
@@ -37,28 +36,38 @@
       </div>
 
       <div class="settings-group">
-        <label>🤖 Modèle Préféré</label>
+        <label>Modèle Préféré</label>
         <select id="settings-model">
           <!-- Sera rempli dynamiquement par JS -->
         </select>
       </div>
 
       <div class="settings-group">
-        <label>🎨 Apparence</label>
+        <label>Apparence</label>
         <div style="display: flex; gap: 10px; margin-top: 5px;">
-          <select id="settings-font-family" style="background: rgba(15, 23, 42, 0.9); color: white; border: 1px solid var(--glass-border); border-radius: 4px; padding: 6px; font-size: 0.8rem; flex: 2;">
+          <select id="settings-font-family" style="flex: 2;">
             <option value="'Inter', sans-serif">Inter (Moderne)</option>
             <option value="'Outfit', sans-serif">Outfit (Élégant)</option>
             <option value="'Roboto', sans-serif">Roboto (Standard)</option>
             <option value="'JetBrains Mono', monospace">JetBrains Mono (Code)</option>
           </select>
-          <select id="settings-font-size" style="background: rgba(15, 23, 42, 0.9); color: white; border: 1px solid var(--glass-border); border-radius: 4px; padding: 6px; font-size: 0.8rem; flex: 1;">
+          <select id="settings-font-size" style="flex: 1;">
             <option value="13px">Petit</option>
             <option value="15px" selected>Moyen</option>
             <option value="18px">Grand</option>
             <option value="22px">X-Large</option>
           </select>
         </div>
+      </div>
+
+      <div class="settings-group">
+        <label>Affichage des noms d'agents</label>
+        <select id="settings-tooltip-mode" style="margin-top: 5px;">
+          <option value="always">Toujours affiché</option>
+          <option value="hover" selected>Au survol</option>
+          <option value="reduced">Réduit (icônes seulement)</option>
+        </select>
+        <p style="font-size: 0.7rem; color: var(--text-muted); margin-top: 4px;">Choisissez comment les noms des agents s'affichent dans la barre latérale</p>
       </div>
 
       <div class="settings-group" id="group-ollama">
@@ -110,28 +119,28 @@
       </div>
 
       <div class="settings-group">
-        <label>📂 Base de Connaissance (RAG)</label>
+        <label>Base de Connaissance (RAG)</label>
         <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 8px;">
           L'IA pourra répondre à vos questions en consultant ce dossier.
         </p>
         <div style="display: flex; flex-direction: column; gap: 8px;">
-          <button class="save-btn" id="select-folder-btn" style="background: rgba(255,255,255,0.05); color: white; width: 100%; border: 1px solid var(--glass-border);">
-            📁 Sélectionner un dossier
+          <button class="save-btn secondary-btn" id="select-folder-btn" style="width: 100%;">
+            Sélectionner un dossier
           </button>
-          <span id="selected-folder-path" style="font-size: 0.7rem; color: var(--accent-neon); word-break: break-all;">Aucun dossier sélectionné</span>
+          <span id="selected-folder-path" style="font-size: 0.7rem; color: #a5aef5; word-break: break-all;">Aucun dossier sélectionné</span>
         </div>
       </div>
 
       <div class="settings-group">
-        <label>🔌 Serveurs MCP</label>
+        <label>Serveurs MCP</label>
         <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 8px;">
           Ajoutez des serveurs MCP, puis l’agent pourra lister et utiliser leurs outils automatiquement.
         </p>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
-          <button class="save-btn" id="open-mcp-manager" style="background: rgba(255,255,255,0.05); color: white; border: 1px solid var(--glass-border);">
+          <button class="save-btn secondary-btn" id="open-mcp-manager">
             Gérer les serveurs
           </button>
-          <button class="save-btn" id="open-mcp-import" style="background: rgba(255,255,255,0.05); color: white; border: 1px solid var(--glass-border);">
+          <button class="save-btn secondary-btn" id="open-mcp-import">
             Parcourir les presets
           </button>
         </div>
@@ -139,19 +148,19 @@
       </div>
 
       <div class="settings-group">
-        <label>⌨️ Raccourcis Personnalisés (Alt + ...)</label>
+        <label>Raccourcis Personnalisés (Alt + ...)</label>
         <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 5px;">
           <div style="display: flex; align-items: center; gap: 10px;">
-            <span style="font-size: 0.8rem; min-width: 50px; color: var(--accent-neon);">Alt + 1 :</span>
-            <select id="shortcut-1" style="background: rgba(255,255,255,0.05); color: white; border: 1px solid var(--glass-border); border-radius: 4px; padding: 4px; flex: 1; font-size: 0.75rem;"></select>
+            <span style="font-size: 0.78rem; min-width: 50px; color: #a5aef5; font-family: var(--font-mono);">Alt + 1 :</span>
+            <select id="shortcut-1" style="flex: 1;"></select>
           </div>
           <div style="display: flex; align-items: center; gap: 10px;">
-            <span style="font-size: 0.8rem; min-width: 50px; color: var(--accent-neon);">Alt + 2 :</span>
-            <select id="shortcut-2" style="background: rgba(255,255,255,0.05); color: white; border: 1px solid var(--glass-border); border-radius: 4px; padding: 4px; flex: 1; font-size: 0.75rem;"></select>
+            <span style="font-size: 0.78rem; min-width: 50px; color: #a5aef5; font-family: var(--font-mono);">Alt + 2 :</span>
+            <select id="shortcut-2" style="flex: 1;"></select>
           </div>
           <div style="display: flex; align-items: center; gap: 10px;">
-            <span style="font-size: 0.8rem; min-width: 50px; color: var(--accent-neon);">Alt + 3 :</span>
-            <select id="shortcut-3" style="background: rgba(255,255,255,0.05); color: white; border: 1px solid var(--glass-border); border-radius: 4px; padding: 4px; flex: 1; font-size: 0.75rem;"></select>
+            <span style="font-size: 0.78rem; min-width: 50px; color: #a5aef5; font-family: var(--font-mono);">Alt + 3 :</span>
+            <select id="shortcut-3" style="flex: 1;"></select>
           </div>
         </div>
       </div>
@@ -230,6 +239,27 @@
 
   <!-- App Layout -->
   <aside class="sidebar">
+    <!-- Top Status Bar -->
+    <div class="sidebar-status-bar" id="sidebar-status-bar">
+      <div class="status-item" id="status-active-agent">
+        <span class="status-icon"></span>
+        <span class="status-label">Aucun agent</span>
+      </div>
+      <div class="status-item" id="status-mcp-servers">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="2" width="20" height="20" rx="2"></rect>
+          <path d="M6 10h12M6 14h12M10 6v12"></path>
+        </svg>
+        <span class="status-label" id="mcp-count">0 MCP</span>
+        <button class="status-chevron" id="mcp-status-toggle" aria-label="Voir les serveurs MCP">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Logo -->
     <div class="logo-icon" title="OmniAgent">
       <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
         <defs>
@@ -253,19 +283,89 @@
         </circle>
       </svg>
     </div>
-    <ul class="agent-list" id="agent-list"></ul>
+
+    <!-- Conversations Section (Moved to Top) -->
+    <div class="conversations-section" id="conversations-section">
+      <div class="conversations-header">
+        <span class="section-title">Conversations</span>
+        <button class="conv-new-btn" id="new-conversation-btn" title="Nouvelle conversation" aria-label="Nouvelle conversation">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+        </button>
+      </div>
+      <input type="text" id="conversation-search" class="conversation-search" placeholder="Rechercher…" aria-label="Rechercher une conversation" />
+      <ul class="conversation-list" id="conversation-list"></ul>
+      <div class="conversations-empty" id="conversations-empty">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+        </svg>
+        <p>Aucune conversation</p>
+        <span>Cliquez sur + pour commencer</span>
+      </div>
+    </div>
+
+    <!-- Agents Section with Category Dropdowns -->
+    <div class="agents-section" id="agents-section">
+      <div class="agents-header">
+        <span class="section-title">Agents</span>
+        <div class="agents-header-actions">
+          <button class="icon-btn small" id="collapse-all-categories" title="Tout réduire" aria-label="Tout réduire">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="18 15 12 9 6 15"></polyline>
+            </svg>
+          </button>
+          <button class="icon-btn small" id="expand-all-categories" title="Tout déplier" aria-label="Tout déplier">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="agent-categories" id="agent-categories"></div>
+    </div>
+
+    <!-- Sidebar Footer -->
     <div class="sidebar-footer">
       <button class="settings-item icon-btn" id="gallery-btn" title="Galerie d'Art">
-        🖼️ Galerie
+        <div class="agent-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+            <circle cx="8.5" cy="8.5" r="1.5"></circle>
+            <polyline points="21 15 16 10 5 21"></polyline>
+          </svg>
+        </div>
+        <div class="agent-tooltip">Galerie</div>
       </button>
       <button class="agent-item settings-item" id="help-btn" title="Aide et Raccourcis">
-        <div class="agent-icon">❓</div>
+        <div class="agent-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+          </svg>
+        </div>
         <div class="agent-tooltip">Aide</div>
       </button>
       <button class="agent-item settings-item" id="settings-btn" title="Paramètres">
-        <div class="agent-icon">⚙️</div>
+        <div class="agent-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82-.33l-.06-.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06-.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+        </div>
         <div class="agent-tooltip">Paramètres</div>
       </button>
+    </div>
+
+    <!-- MCP Status Dropdown (Hidden by default) -->
+    <div class="mcp-status-dropdown" id="mcp-status-dropdown">
+      <div class="mcp-status-header">
+        <span>Serveurs MCP Actifs</span>
+        <button class="icon-btn small" id="mcp-status-close" aria-label="Fermer">✕</button>
+      </div>
+      <ul class="mcp-status-list" id="mcp-status-list"></ul>
     </div>
   </aside>
 
@@ -280,7 +380,7 @@
       <div id="dynamic-commands-help"></div>
 
       <div class="help-section">
-        <h4>⌨️ Raccourcis Clavier</h4>
+        <h4>Raccourcis Clavier</h4>
         <ul class="shortcut-list">
           <li><kbd>Ctrl</kbd> + <kbd>Enter</kbd> <span>Envoyer le message</span></li>
           <li><kbd>Ctrl</kbd> + <kbd>K</kbd> <span>Effacer l'historique</span></li>
@@ -324,9 +424,28 @@
               </svg>
               <h2 id="active-agent-name">OmniAgent</h2>
             </div>
-            <span id="active-agent-model" class="model-badge"></span>
           </div>
           <p id="active-agent-desc">Choisissez votre expert</p>
+          <div class="model-selector-row">
+            <span id="active-agent-model" class="model-badge"></span>
+            <div class="model-picker" id="model-picker">
+              <button type="button" class="model-picker-btn" id="model-picker-btn" aria-haspopup="listbox" aria-expanded="false">
+                <span id="model-picker-label">Modèle par défaut</span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="model-picker-dropdown" id="model-picker-dropdown" role="listbox" style="display:none;">
+                <div class="model-picker-search-row">
+                  <input type="text" id="model-picker-search" placeholder="Rechercher un modèle…" autocomplete="off" />
+                </div>
+                <div class="model-picker-filters">
+                  <button type="button" class="model-filter-chip active" data-filter="all">Tous</button>
+                  <button type="button" class="model-filter-chip" data-filter="free">Gratuits</button>
+                  <button type="button" class="model-filter-chip" data-filter="paid">Payants</button>
+                </div>
+                <div class="model-picker-list" id="model-picker-list" role="listbox"></div>
+              </div>
+            </div>
+          </div>
           <div id="kb-source-badge" class="kb-badge" style="display: none;"></div>
         </div>
         <div class="header-actions">
@@ -406,7 +525,7 @@
   <div class="settings-overlay" id="gallery-overlay">
     <div class="settings-card" style="width: 800px; max-width: 95vw; height: 80vh; display: flex; flex-direction: column;">
       <div class="settings-header">
-        <h3>🖼️ Galerie d'Art Locale</h3>
+        <h3>Galerie d'Art Locale</h3>
         <button class="icon-btn" onclick="document.getElementById('gallery-overlay').classList.remove('open')">✖</button>
       </div>
       <div id="gallery-grid">
