@@ -15,6 +15,77 @@
 </head>
 <body>
 
+  <!-- Custom Titlebar (decorations: false) -->
+  <div id="custom-titlebar" class="custom-titlebar">
+    <div class="titlebar-drag">
+      <svg class="titlebar-logo" width="16" height="16" viewBox="0 0 100 100" fill="none">
+        <defs><linearGradient id="tb-grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#8b5cf6"/><stop offset="100%" stop-color="#3b82f6"/></linearGradient></defs>
+        <path d="M50 25 L75 50 L50 75 L25 50 Z" fill="url(#tb-grad)"/>
+      </svg>
+      <span class="titlebar-text">OmniAgent</span>
+    </div>
+    <div class="titlebar-actions">
+      <button class="titlebar-btn" id="titlebar-minimize" aria-label="Réduire">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      </button>
+      <button class="titlebar-btn" id="titlebar-maximize" aria-label="Agrandir">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="1"/></svg>
+      </button>
+      <button class="titlebar-btn titlebar-close" id="titlebar-close" aria-label="Fermer">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Update Notification Banner -->
+  <div id="update-banner" class="update-banner" style="display:none;">
+    <div class="update-banner-content">
+      <div class="update-banner-icon">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+      </div>
+      <div class="update-banner-text">
+        <span class="update-banner-title">Mise à jour disponible</span>
+        <span class="update-banner-version" id="update-version-text"></span>
+      </div>
+      <button class="update-banner-btn" id="update-install-btn">Installer</button>
+      <button class="update-banner-dismiss" id="update-dismiss-btn">✕</button>
+    </div>
+  </div>
+
+  <!-- Update Modal -->
+  <div class="settings-overlay" id="update-modal">
+    <div class="settings-card update-modal-card">
+      <div class="settings-header">
+        <h3>Mise à jour</h3>
+        <button class="icon-btn" id="update-modal-close">✕</button>
+      </div>
+      <div id="update-modal-body">
+        <div class="update-status-icon" id="update-status-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+        </div>
+        <p id="update-modal-text" style="text-align:center; color: var(--foreground-muted); font-size: 0.9rem; margin-top: 12px;">Vérification en cours…</p>
+        <div id="update-progress-container" style="display:none; margin-top: 16px;">
+          <div class="update-progress-bar">
+            <div class="update-progress-fill" id="update-progress-fill"></div>
+          </div>
+          <p id="update-progress-text" style="text-align:center; font-size: 0.75rem; color: var(--foreground-muted); margin-top: 8px;">Téléchargement…</p>
+        </div>
+      </div>
+      <div class="update-modal-actions" id="update-modal-actions" style="display:none;">
+        <button class="save-btn" id="update-modal-install">Mettre à jour</button>
+        <button class="save-btn" id="update-modal-check" style="background: rgba(255,255,255,0.05); border: 1px solid var(--border);">Re-vérifier</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Settings Overlay Panel -->
   <div class="settings-overlay" id="settings-panel">
     <div class="settings-card">
@@ -237,7 +308,8 @@
     </div>
   </div>
 
-  <!-- App Layout -->
+  <!-- App Content (sidebar + main) -->
+  <div class="app-content">
   <aside class="sidebar">
     <!-- Top Status Bar -->
     <div class="sidebar-status-bar" id="sidebar-status-bar">
@@ -395,11 +467,24 @@
           <li><strong>Vision :</strong> Glissez une image ou cliquez sur 📎 pour l'analyser.</li>
           <li><strong>Dictée :</strong> Utilisez le micro pour parler à l'IA.</li>
           <li><strong>RAG :</strong> Indexez vos dossiers locaux dans les paramètres ⚙️.</li>
+          <li><strong>Mises à jour :</strong> L'application se met à jour automatiquement.</li>
         </ul>
       </div>
 
+      <div class="help-section">
+        <h4>🔄 Mise à jour</h4>
+        <p style="font-size: 0.8rem; color: var(--foreground-muted); margin-bottom: 10px;">Vérifiez manuellement si une nouvelle version est disponible.</p>
+        <button class="save-btn secondary-btn" id="check-update-btn" style="width: 100%;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; vertical-align: middle;">
+            <polyline points="23 4 23 10 17 10"/>
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+          </svg>
+          Vérifier les mises à jour
+        </button>
+      </div>
+
       <div class="help-footer">
-        <p>OmniAgent v1.5 • Propulsé par Tauri & IA Locale</p>
+        <p>OmniAgent v0.1.1 • Propulsé par Tauri & IA Locale</p>
       </div>
     </div>
   </div>
@@ -520,6 +605,7 @@
       </div>
     </main>
   </div>
+  </div><!-- end app-content -->
 
   <!-- Gallery Overlay -->
   <div class="settings-overlay" id="gallery-overlay">

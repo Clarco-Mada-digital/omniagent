@@ -2981,6 +2981,202 @@ function setupEventListeners() {
   document.getElementById('help-close').addEventListener('click', () => {
     helpPanel.classList.remove('open');
   });
+
+  // Check for updates button in help panel
+  document.getElementById('check-update-btn')?.addEventListener('click', () => {
+    helpPanel.classList.remove('open');
+    document.getElementById('update-modal').classList.add('open');
+    manualCheckForUpdates();
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CUSTOM TITLEBAR
+// ═══════════════════════════════════════════════════════════════
+
+async function setupTitlebar() {
+  try {
+    // Tauri v2: getCurrentWindow() returns the Window object
+    const { Window } = window.__TAURI__?.window || {};
+    let appWindow = null;
+
+    if (Window?.getCurrent) {
+      appWindow = Window.getCurrent();
+    } else if (window.__TAURI__?.window?.appWindow) {
+      appWindow = window.__TAURI__.window.appWindow;
+    }
+
+    if (!appWindow) {
+      console.warn('Could not get Tauri window handle');
+      return;
+    }
+
+    // Drag: startDragging on mousedown on the drag area
+    const dragArea = document.querySelector('.titlebar-drag');
+    if (dragArea) {
+      dragArea.addEventListener('mousedown', (e) => {
+        // Don't start drag if clicking on a button or link
+        if (e.target.closest('button, a, input')) return;
+        appWindow.startDragging();
+      });
+    }
+
+    document.getElementById('titlebar-minimize')?.addEventListener('click', () => appWindow.minimize());
+    document.getElementById('titlebar-maximize')?.addEventListener('click', async () => {
+      const maximized = await appWindow.isMaximized();
+      if (maximized) appWindow.unmaximize();
+      else appWindow.maximize();
+    });
+    document.getElementById('titlebar-close')?.addEventListener('click', () => appWindow.close());
+  } catch (e) {
+    console.warn('Titlebar setup failed:', e);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// AUTO-UPDATER
+// ═══════════════════════════════════════════════════════════════
+
+let pendingUpdate = null;
+
+async function checkForUpdates() {
+  try {
+    const { check } = window.__TAURI__.updater;
+    const update = await check();
+    if (update) {
+      pendingUpdate = update;
+      showUpdateBanner(update.version);
+    }
+  } catch (e) {
+    console.log('Auto-update check skipped:', e.message || e);
+  }
+}
+
+function showUpdateBanner(version) {
+  const banner = document.getElementById('update-banner');
+  const versionText = document.getElementById('update-version-text');
+  if (!banner || !versionText) return;
+
+  versionText.textContent = `Version ${version} disponible`;
+  banner.style.display = 'block';
+
+  document.getElementById('update-install-btn')?.addEventListener('click', () => {
+    installUpdate();
+  });
+  document.getElementById('update-dismiss-btn')?.addEventListener('click', () => {
+    banner.style.display = 'none';
+  });
+}
+
+async function installUpdate() {
+  if (!pendingUpdate) return;
+
+  const modal = document.getElementById('update-modal');
+  const body = document.getElementById('update-modal-text');
+  const actions = document.getElementById('update-modal-actions');
+  const progressContainer = document.getElementById('update-progress-container');
+  const progressFill = document.getElementById('update-progress-fill');
+  const progressText = document.getElementById('update-progress-text');
+
+  // Hide banner, show modal
+  document.getElementById('update-banner').style.display = 'none';
+  modal.classList.add('open');
+
+  body.textContent = `Installation de la version ${pendingUpdate.version}…`;
+  actions.style.display = 'none';
+  progressContainer.style.display = 'block';
+  progressFill.style.width = '10%';
+  progressText.textContent = 'Téléchargement en cours…';
+
+  try {
+    // Simulate progress
+    let progress = 10;
+    const progressInterval = setInterval(() => {
+      if (progress < 85) {
+        progress += Math.random() * 15;
+        progressFill.style.width = Math.min(progress, 85) + '%';
+        if (progress > 40) progressText.textContent = 'Extraction des fichiers…';
+        if (progress > 70) progressText.textContent = 'Préparation de l\'installation…';
+      }
+    }, 500);
+
+    await pendingUpdate.downloadAndInstall((event) => {
+      if (event.data?.contentLength) {
+        const pct = ((event.data.chunkLength || 0) / event.data.contentLength * 100);
+        progressFill.style.width = Math.min(pct, 95) + '%';
+      }
+    });
+
+    clearInterval(progressInterval);
+    progressFill.style.width = '100%';
+    progressText.textContent = 'Installation terminée !';
+    body.innerHTML = '<span style="color: var(--success); font-weight: 600;">✅ Mise à jour installée avec succès !</span><br><span style="color: var(--foreground-muted); font-size: 0.85rem; margin-top: 8px; display: block;">L\'application va redémarrer…</span>';
+
+    // Restart app
+    setTimeout(async () => {
+      try {
+        const { restart } = window.__TAURI__.process;
+        await restart();
+      } catch (e) {
+        console.warn('Restart failed:', e);
+      }
+    }, 1500);
+  } catch (e) {
+    clearInterval(progressInterval);
+    progressContainer.style.display = 'none';
+    body.innerHTML = `<span style="color: var(--danger); font-weight: 600;">❌ Échec de la mise à jour</span><br><span style="color: var(--foreground-muted); font-size: 0.85rem; margin-top: 8px; display: block;">${e.message || e}</span>`;
+    actions.style.display = 'flex';
+  }
+}
+
+// Manual check from modal
+async function manualCheckForUpdates() {
+  const body = document.getElementById('update-modal-text');
+  const actions = document.getElementById('update-modal-actions');
+  const progressContainer = document.getElementById('update-progress-container');
+  const statusIcon = document.getElementById('update-status-icon');
+
+  body.textContent = 'Vérification en cours…';
+  actions.style.display = 'none';
+  progressContainer.style.display = 'none';
+  statusIcon.innerHTML = `<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="spin-icon"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`;
+
+  try {
+    const { check } = window.__TAURI__.updater;
+    const update = await check();
+    if (update) {
+      pendingUpdate = update;
+      statusIcon.innerHTML = `<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
+      body.innerHTML = `<span style="color: var(--foreground); font-weight: 500;">Une mise à jour est disponible !</span><br><span style="color: var(--foreground-muted); font-size: 0.85rem; margin-top: 4px; display: block;">Version ${update.version}</span>`;
+      actions.style.display = 'flex';
+    } else {
+      statusIcon.innerHTML = `<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`;
+      body.innerHTML = '<span style="color: var(--success); font-weight: 500;">Vous êtes à jour !</span>';
+    }
+  } catch (e) {
+    statusIcon.innerHTML = `<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`;
+    body.innerHTML = `<span style="color: var(--danger); font-weight: 500;">Impossible de vérifier les mises à jour</span><br><span style="color: var(--foreground-muted); font-size: 0.85rem; margin-top: 4px; display: block;">${e.message || e}</span>`;
+  }
+}
+
+// Setup update modal listeners
+function setupUpdateModal() {
+  const updateModal = document.getElementById('update-modal');
+  document.getElementById('update-modal-close')?.addEventListener('click', () => {
+    updateModal.classList.remove('open');
+  });
+  document.getElementById('update-modal-install')?.addEventListener('click', () => {
+    updateModal.classList.remove('open');
+    installUpdate();
+  });
+  document.getElementById('update-modal-check')?.addEventListener('click', manualCheckForUpdates);
+  // Close on overlay click
+  updateModal?.addEventListener('click', (e) => {
+    if (e.target === updateModal) updateModal.classList.remove('open');
+  });
 }
 
 init();
+setupTitlebar();
+setupUpdateModal();
+setTimeout(checkForUpdates, 3000); // Check updates 3s after startup
