@@ -79,7 +79,15 @@ console.log(`  ✔ src-tauri/Cargo.toml → ${version}`);
 // ── 4. Commit, tag, push ───────────────────────────────────────────
 console.log('\n📦 Commit, tag et push…');
 run('git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml');
-run(`git commit -m "chore: release ${tag}"`);
+
+// Si la version est déjà à jour, il n'y a rien à commit — ce n'est pas une erreur
+const staged = run('git diff --cached --quiet || echo dirty', { silent: true }).trim();
+if (staged === 'dirty') {
+  run(`git commit -m "chore: release ${tag}"`);
+} else {
+  console.log('  ℹ Version déjà à jour, rien à commit.');
+}
+
 run(`git tag ${tag}`);
 run('git push');
 run(`git push origin ${tag}`);
